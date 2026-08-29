@@ -1,6 +1,7 @@
 package osd
 
 import (
+	"math"
 	"testing"
 	"time"
 )
@@ -158,5 +159,63 @@ func TestCommitSeekReportsOnce(t *testing.T) {
 	case got := <-seen:
 		t.Fatalf("the seek was reported twice (%v)", got)
 	case <-time.After(150 * time.Millisecond):
+	}
+}
+
+// The opacity slider's arithmetic, and its inverse. Anything below the floor
+// stops being readable over a bright background, so the mapping never offers
+// it - not from the slider and not from a config file.
+func TestOpacityMapsAlongTheSlider(t *testing.T) {
+	const x0, w0 = 200.0, 80.0
+
+	if got := opacityAt(x0, x0, w0); got != lyrOpacityMin {
+		t.Errorf("left end should be the floor, got %v", got)
+	}
+	if got := opacityAt(x0+w0, x0, w0); got != 1 {
+		t.Errorf("right end should be fully opaque, got %v", got)
+	}
+	mid := opacityAt(x0+w0/2, x0, w0)
+	if want := lyrOpacityMin + (1-lyrOpacityMin)/2; math.Abs(mid-want) > 1e-9 {
+		t.Errorf("middle: want %v, got %v", want, mid)
+	}
+	if got := opacityAt(x0-500, x0, w0); got != lyrOpacityMin {
+		t.Errorf("past the left end should clamp, got %v", got)
+	}
+	if got := opacityAt(x0+900, x0, w0); got != 1 {
+		t.Errorf("past the right end should clamp, got %v", got)
+	}
+
+	// Round-tripping a value through the drawing fraction must land back on
+	// itself, or the handle would sit somewhere other than the setting.
+	for _, v := range []float64{lyrOpacityMin, 0.5, 0.7, 0.94, 1} {
+		f := opacityFraction(v)
+		if back := opacityAt(x0+f*w0, x0, w0); math.Abs(back-v) > 1e-9 {
+			t.Errorf("round trip of %v gave %v", v, back)
+		}
+	}
+}
+
+func TestClampOpacityRefusesTheUnreadable(t *testing.T) {
+	if got := clampOpacity(0.05); got != lyrOpacityMin {
+		t.Errorf("want the floor, got %v", got)
+	}
+	if got := clampOpacity(2); got != 1 {
+		t.Errorf("want 1, got %v", got)
+	}
+	if got := clampOpacity(0.8); got != 0.8 {
+		t.Errorf("a legal value should pass through, got %v", got)
+	}
+}
+
+// A zero opacity in the options means "not set", and must not be read as
+// "invisible".
+func TestUnsetOpacityFallsBackToADefault(t *testing.T) {
+	w := &LyricsWindow{}
+	if got := w.opacity(); got < 0.9 {
+		t.Fatalf("an unset opacity should default to nearly solid, got %v", got)
+	}
+	w.opts.Opacity = 0.6
+	if got := w.opacity(); got != 0.6 {
+		t.Fatalf("want 0.6, got %v", got)
 	}
 }

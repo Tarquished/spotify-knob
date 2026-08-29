@@ -80,6 +80,10 @@ type LyricsOptions struct {
 	// the position they dropped it at. It may block: the panel calls it on
 	// its own goroutine.
 	OnSeek func(pos time.Duration)
+
+	// OnOpacity is called when the user lets go of the opacity slider, so the
+	// caller can remember how see-through they wanted the panel.
+	OnOpacity func(v float64)
 }
 
 // Lyrics panel geometry, in logical pixels before the display scale.
@@ -93,12 +97,20 @@ const (
 
 	lyrMargin   = 5 // transparent gutter for the outer ring
 	lyrRadius   = 20
-	lyrHeaderH  = 68
+	lyrHeaderH  = 76
 	lyrFooterH  = 44
 	lyrBodyPadX = 26
 	lyrThumb    = 46
 	lyrGripSize = 22
 	lyrEdge     = 7 // grab band along the right and bottom edges
+
+	// The opacity slider lives in the header, under the close button.
+	lyrSliderW    = 80
+	lyrSliderH    = 3
+	lyrSliderKnob = 5.5
+	// Below this the panel stops being readable over a bright background, so
+	// the slider will not go there and neither will the config.
+	lyrOpacityMin = 0.40
 
 	lyrLineSize    = 19
 	lyrLineGap     = 11   // between wrapped paragraphs
@@ -124,6 +136,7 @@ const (
 	zoneGripCorner
 	zoneGripBottom
 	zoneRail
+	zoneOpacity
 )
 
 // dragMode is what a held mouse button is currently doing.
@@ -135,6 +148,7 @@ const (
 	dragResize
 	dragScroll
 	dragSeek
+	dragOpacity
 )
 
 type lyricsCmdKind int
@@ -198,6 +212,13 @@ type LyricsWindow struct {
 	scrubPos  time.Duration
 	seekHold  time.Time
 	railHot   bool
+
+	// The opacity slider. sliderShow keeps the percentage readout up for a
+	// moment after the drag ends, so the number does not vanish the instant
+	// you let go of it.
+	sliderHot  bool
+	sliding    bool
+	sliderShow time.Time
 
 	// Input state.
 	drag        dragMode
@@ -385,8 +406,33 @@ func (w *LyricsWindow) opacity() float64 {
 	if o <= 0 {
 		return 0.95
 	}
-	// Below half the panel stops being readable over a bright background.
-	return math.Min(1, math.Max(0.5, o))
+	return clampOpacity(o)
+}
+
+// clampOpacity keeps a value inside the range the slider offers, so a config
+// file and a dragged handle cannot disagree about what is possible.
+func clampOpacity(v float64) float64 {
+	return math.Min(1, math.Max(lyrOpacityMin, v))
+}
+
+// opacityAt maps a pointer position along the slider onto an opacity, and
+// opacityFraction is its inverse for drawing the fill. Both are free functions
+// so the mapping can be tested without a window.
+func opacityAt(x, sliderX, sliderW float64) float64 {
+	if sliderW <= 0 {
+		return 1
+	}
+	f := (x - sliderX) / sliderW
+	if f < 0 {
+		f = 0
+	} else if f > 1 {
+		f = 1
+	}
+	return lyrOpacityMin + f*(1-lyrOpacityMin)
+}
+
+func opacityFraction(v float64) float64 {
+	return (clampOpacity(v) - lyrOpacityMin) / (1 - lyrOpacityMin)
 }
 
 func (w *LyricsWindow) frameInterval() time.Duration {

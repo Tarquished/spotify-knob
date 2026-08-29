@@ -167,6 +167,11 @@ func run(cfgPath string, verbose, doAuth, noHotkey, statusOnly bool, pasteCode s
 	go func() {
 		log.Info("listening", "addr", srv.Addr())
 		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			// Also to the log, not just to the error return. The windowless
+			// build has no stderr to read, so "another daemon already has the
+			// port" would otherwise show up as nothing but a process that
+			// quietly stops before the overlay ever starts.
+			log.Error("http listener failed", "addr", srv.Addr(), "err", err)
 			serveErr <- err
 		}
 		close(serveErr)
@@ -185,7 +190,8 @@ func run(cfgPath string, verbose, doAuth, noHotkey, statusOnly bool, pasteCode s
 		}
 	}()
 
-	panelOpts := lyricsOptions(cfg, loadGeometry(dir), saveGeometry(dir, log))
+	store := newPanelStore(dir, log)
+	panelOpts := lyricsOptions(cfg, store)
 	panelOpts.OnSeek = func(pos time.Duration) { ctl.Seek(context.WithoutCancel(ctx), pos) }
 	panel := osd.NewLyrics(panelOpts, log)
 	lyr := newLyricsManager(ctl, panel, card,
@@ -236,7 +242,11 @@ func run(cfgPath string, verbose, doAuth, noHotkey, statusOnly bool, pasteCode s
 		watchConfig(ctx, cfgPath, cfg, log, func(next config.Config) {
 			ctl.Reconfigure(controllerOptions(next))
 			card.Reconfigure(osdOptions(next))
-			nextPanel := lyricsOptions(next, panelGeometry{}, saveGeometry(dir, log))
+			// A config edit is an explicit statement, so its opacity wins over
+			// whatever the slider was last dragged to.
+			nextPanel := lyricsOptions(next, store)
+			nextPanel.X, nextPanel.Y, nextPanel.W, nextPanel.H = 0, 0, 0, 0
+			nextPanel.Opacity = next.Lyrics.Opacity
 			nextPanel.OnSeek = panelOpts.OnSeek
 			panel.Reconfigure(nextPanel)
 			gestures.Store(gestureFrom(next))
@@ -299,7 +309,7 @@ func runLyricsPreview(cfgPath, want string, verbose bool) error {
 		artist, title = want[:i], want[i+3:]
 	}
 
-	opts := lyricsOptions(cfg, panelGeometry{}, nil)
+	opts := lyricsOptions(cfg, newPanelStore(dir, log))
 	opts.Enabled = true
 	panel := osd.NewLyrics(opts, log)
 
@@ -503,8 +513,9 @@ func osdOptions(cfg config.Config) osd.Options {
 // panel's options. Geometry does not come from the config file: it is set by
 // dragging, and a hot reload must not yank a panel back to where the file
 // last said it was.
-func lyricsOptions(cfg config.Config, g panelGeometry, save func(x, y, w, h int)) osd.LyricsOptions {
-	return osd.LyricsOptions{
+func lyricsOptions(cfg config.Config, store *panelStore) osd.LyricsOptions {
+	g := store.load()
+	opts := osd.LyricsOptions{
 		Enabled:    cfg.Lyrics.Enabled,
 		Opacity:    cfg.Lyrics.Opacity,
 		Scale:      cfg.Lyrics.Scale,
@@ -513,8 +524,15 @@ func lyricsOptions(cfg config.Config, g panelGeometry, save func(x, y, w, h int)
 		Y:          g.Y,
 		W:          g.W,
 		H:          g.H,
-		OnGeometry: save,
+		OnGeometry: store.Geometry,
+		OnOpacity:  store.Opacity,
 	}
+	// A value dragged on the slider outlives a restart, and outranks the
+	// config default it started from.
+	if g.Opacity > 0 {
+		opts.Opacity = g.Opacity
+	}
+	return opts
 }
 
 func gestureFrom(cfg config.Config) *gestureConfig {

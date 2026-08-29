@@ -103,6 +103,13 @@ func (p *painter) circle(cx, cy, rad float64) {
 	circle(p.rast, float32(cx)-ox, float32(cy)-oy, float32(rad))
 }
 
+// circleRev winds a circle the other way, so adding it to a path already
+// holding a larger circle punches a hole and leaves a ring.
+func (p *painter) circleRev(cx, cy, rad float64) {
+	ox, oy := p.origin()
+	circleRev(p.rast, float32(cx)-ox, float32(cy)-oy, float32(rad))
+}
+
 func (p *painter) polygon(pts ...float64) {
 	ox, oy := p.origin()
 	fs := make([]float32, len(pts))
@@ -351,6 +358,10 @@ func roundRectRev(r *vector.Rasterizer, x, y, w, h, rad float32) {
 
 func circle(r *vector.Rasterizer, cx, cy, rad float32) {
 	roundRect(r, cx-rad, cy-rad, rad*2, rad*2, rad)
+}
+
+func circleRev(r *vector.Rasterizer, cx, cy, rad float32) {
+	roundRectRev(r, cx-rad, cy-rad, rad*2, rad*2, rad)
 }
 
 func polygon(r *vector.Rasterizer, pts ...float32) {

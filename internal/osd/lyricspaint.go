@@ -1,6 +1,7 @@
 package osd
 
 import (
+	"fmt"
 	"image/color"
 	"math"
 	"time"
@@ -75,31 +76,52 @@ func (w *LyricsWindow) render() {
 	w.drawGrip(cx+cw, cy+ch)
 }
 
+// headerMetrics places the header's two controls. Like footerMetrics, it is
+// shared by the painter and the hit test so what is drawn and what is
+// clickable can never drift apart.
+func (w *LyricsWindow) headerMetrics() (closeX, closeY, closeR, sliderX, sliderW, sliderY float64) {
+	m := w.px(lyrMargin)
+	cx, cw := m, float64(w.win.w)-2*m
+	inset := w.px(18)
+
+	closeR = w.px(11)
+	closeX = cx + cw - inset - closeR
+	closeY = m + w.px(19) + closeR
+
+	sliderW = w.px(lyrSliderW)
+	sliderX = cx + cw - inset - sliderW
+	sliderY = m + w.px(58)
+	return closeX, closeY, closeR, sliderX, sliderW, sliderY
+}
+
 func (w *LyricsWindow) drawHeader(cx, cy, cw float64, accent color.RGBA) {
 	p := w.paint
 	fs := w.fonts
 	inset := w.px(18)
 	thumb := w.px(lyrThumb)
 
-	w.drawCover(cx+inset, cy+w.px(11), thumb, accent)
+	w.drawCover(cx+inset, cy+w.px(13), thumb, accent)
 
 	titleFace := fs.face(semibold, w.px(14.5))
 	artistFace := fs.face(regular, w.px(12))
 	badgeFace := fs.face(bold, w.px(8))
 
 	textX := cx + inset + thumb + w.px(14)
-	closeR := w.px(11)
-	closeX := cx + cw - inset - closeR
-	closeY := cy + w.px(20) + closeR
+	closeX, closeY, closeR, sliderX, sliderW, sliderY := w.headerMetrics()
 
-	// The badge names where the words came from. It sits left of the close
-	// button, quiet enough to ignore and specific enough to answer "why are
-	// these lyrics slightly off".
+	// The badge names where the words came from, and gives way to the opacity
+	// readout while the slider is being dragged - the number matters more in
+	// that moment than the provider does.
+	label, labelCol := w.sourceLabel(), rgba(255, 255, 255, 0.30)
+	if w.sliding || time.Now().Before(w.sliderShow) {
+		label = fmt.Sprintf("%d%%", int(w.opacity()*100+0.5))
+		labelCol = premul(accent)
+	}
 	badgeW := 0.0
-	if src := w.sourceLabel(); src != "" {
-		badgeW = measureTracked(badgeFace, src, w.px(0.9)) + w.px(14)
-		drawTracked(p.dst, badgeFace, rgba(255, 255, 255, 0.30),
-			closeX-closeR-badgeW, cy+w.px(37), src, w.px(0.9))
+	if label != "" {
+		badgeW = measureTracked(badgeFace, label, w.px(0.9)) + w.px(14)
+		drawTracked(p.dst, badgeFace, labelCol,
+			closeX-closeR-badgeW, cy+w.px(34), label, w.px(0.9))
 	}
 
 	textMax := closeX - closeR - badgeW - w.px(12) - textX
@@ -107,19 +129,66 @@ func (w *LyricsWindow) drawHeader(cx, cy, cw float64, accent color.RGBA) {
 	if title == "" {
 		title = "Nothing playing"
 	}
-	drawText(p.dst, titleFace, colText, textX, cy+w.px(31),
+	drawText(p.dst, titleFace, colText, textX, cy+w.px(29),
 		truncate(titleFace, title, textMax))
 	if w.track.Artist != "" {
-		drawText(p.dst, artistFace, colTextMuted, textX, cy+w.px(50),
+		drawText(p.dst, artistFace, colTextMuted, textX, cy+w.px(48),
 			truncate(artistFace, w.track.Artist, textMax))
 	}
 
 	w.drawClose(closeX, closeY, closeR)
+	w.drawOpacitySlider(sliderX, sliderY, sliderW, accent)
 
 	div := cy + w.px(lyrHeaderH) - w.px(1)
 	p.begin(cx+inset, div, cw-2*inset, 1)
 	p.roundRect(cx+inset, div, cw-2*inset, 1, 0.5)
 	p.flat(colLyrDivide)
+}
+
+// drawOpacitySlider is the transparency control: a half-filled disc for a
+// label, then a track whose filled part is how solid the panel is.
+//
+// It is drawn at the panel's own opacity like everything else, which is the
+// point - the control shows you the setting by being subject to it.
+func (w *LyricsWindow) drawOpacitySlider(x, midY, ww float64, accent color.RGBA) {
+	p := w.paint
+	icon := w.px(4.6)
+	iconX := x - w.px(9)
+
+	// The glyph: a ring, with its left half filled. Nothing in the font set
+	// draws this, and at 9px an icon reads faster than a word.
+	p.begin(iconX-icon, midY-icon, icon*2, icon*2)
+	p.circle(iconX, midY, icon)
+	p.circleRev(iconX, midY, icon-math.Max(w.px(1), 1))
+	p.flat(rgba(255, 255, 255, 0.34))
+
+	p.begin(iconX-icon, midY-icon, icon, icon*2)
+	p.circle(iconX, midY, icon-math.Max(w.px(1), 1))
+	p.flat(rgba(255, 255, 255, 0.34))
+
+	h := w.px(lyrSliderH)
+	if w.sliderHot || w.sliding {
+		h = w.px(4.5)
+	}
+	y := midY - h/2
+	p.begin(x, y, ww, h)
+	p.roundRect(x, y, ww, h, h/2)
+	p.flat(colProgress)
+
+	f := opacityFraction(w.opts.Opacity)
+	fw := math.Max(ww*f, h)
+	p.begin(x, y, fw, h)
+	p.roundRect(x, y, fw, h, h/2)
+	p.flat(scaleAlpha(premul(accent), 0.85))
+
+	knob := w.px(lyrSliderKnob)
+	if w.sliderHot || w.sliding {
+		knob = w.px(6.5)
+	}
+	kx := math.Min(math.Max(x+ww*f, x+knob), x+ww-knob)
+	p.begin(kx-knob, midY-knob, knob*2, knob*2)
+	p.circle(kx, midY, knob)
+	p.flat(colText)
 }
 
 // sourceLabel names the provider and whether the timing is real.
@@ -466,12 +535,15 @@ func (w *LyricsWindow) hitZone(x, y int) zone {
 		return zoneGripCorner // the right edge resizes width the same way
 	}
 
-	inset := w.px(18)
-	closeR := w.px(11)
-	closeX := m + (W - 2*m) - inset - closeR
-	closeY := m + w.px(20) + closeR
+	closeX, closeY, closeR, sliderX, sliderW, sliderY := w.headerMetrics()
 	if math.Hypot(fx-closeX, fy-closeY) <= closeR+w.px(4) {
 		return zoneClose
+	}
+	// The slider's grab band reaches past both ends and well above and below
+	// the 3px track, which is far too thin to aim at.
+	if fy > sliderY-w.px(10) && fy < sliderY+w.px(10) &&
+		fx > sliderX-w.px(12) && fx < sliderX+sliderW+w.px(8) {
+		return zoneOpacity
 	}
 
 	// The rail is a thin thing to hit, so the grab band is much taller than
@@ -510,6 +582,10 @@ func (w *LyricsWindow) onMouseDown(x, y int) {
 		w.scrubbing = true
 		w.scrubTo(x)
 		w.dirty = true
+	case zoneOpacity:
+		w.drag = dragOpacity
+		w.sliding = true
+		w.slideTo(x)
 	case zoneHeader:
 		w.drag = dragMove
 	default:
@@ -532,6 +608,10 @@ func (w *LyricsWindow) onMouseMove(x, y int) {
 	}
 	if hot := z == zoneRail; hot != w.railHot {
 		w.railHot = hot
+		w.dirty = true
+	}
+	if hot := z == zoneOpacity; hot != w.sliderHot {
+		w.sliderHot = hot
 		w.dirty = true
 	}
 	if w.drag == dragNone {
@@ -569,6 +649,9 @@ func (w *LyricsWindow) onMouseMove(x, y int) {
 		w.scrubTo(x)
 		w.dirty = true
 
+	case dragOpacity:
+		w.slideTo(x)
+
 	case dragScroll:
 		if dy != 0 {
 			w.scrollTo = w.clampScroll(w.scrollTo - float64(dy))
@@ -594,7 +677,26 @@ func (w *LyricsWindow) onMouseUp() {
 		}
 	case dragSeek:
 		w.commitSeek()
+	case dragOpacity:
+		w.sliding = false
+		// Leave the percentage up for a moment: it is the confirmation that
+		// the value you let go of is the value that stuck.
+		w.sliderShow = time.Now().Add(1500 * time.Millisecond)
+		w.dirty = true
+		if w.opts.OnOpacity != nil {
+			v := w.opts.Opacity
+			go w.opts.OnOpacity(v)
+		}
 	}
+}
+
+// slideTo sets the panel's opacity from a pointer position on the slider.
+// The change is live: the next frame is composed at the new value, which is
+// the only honest way to pick a transparency.
+func (w *LyricsWindow) slideTo(x int) {
+	_, _, _, sliderX, sliderW, _ := w.headerMetrics()
+	w.opts.Opacity = opacityAt(float64(x), sliderX, sliderW)
+	w.dirty = true
 }
 
 // scrubTo moves the handle to a pointer position, in client coordinates.
@@ -646,7 +748,7 @@ func (w *LyricsWindow) applyCursor() bool {
 		setCursorShape(cursorSizeNWSE)
 	case zoneGripBottom:
 		setCursorShape(cursorSizeNS)
-	case zoneClose, zoneRail:
+	case zoneClose, zoneRail, zoneOpacity:
 		setCursorShape(cursorHand)
 	default:
 		setCursorShape(cursorArrow)

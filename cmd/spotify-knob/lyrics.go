@@ -327,38 +327,74 @@ func convertDoc(l *lyrics.Lyrics) *osd.LyricDoc {
 // ---------------------------------------------------------------------------
 // Where the panel was left
 
-// panelGeometry is the panel's remembered place on screen.
-type panelGeometry struct {
-	X int `json:"x"`
-	Y int `json:"y"`
-	W int `json:"w"`
-	H int `json:"h"`
+// panelState is what the user set by hand: where they dragged the panel, how
+// big they made it, and how see-through they wanted it.
+//
+// It is deliberately not in config.json. Those values are set by dragging, and
+// writing them back into a file the user also edits would fight the hot
+// reload - every drag would look like a config change. An explicit edit to
+// config.json still wins, because that is someone stating an intent rather
+// than moving a window.
+type panelState struct {
+	X       int     `json:"x"`
+	Y       int     `json:"y"`
+	W       int     `json:"w"`
+	H       int     `json:"h"`
+	Opacity float64 `json:"opacity,omitempty"`
 }
 
-func geometryPath(dir string) string { return filepath.Join(dir, "lyrics-window.json") }
+// panelStore keeps the last known state so a geometry change and an opacity
+// change do not overwrite each other's half of the file.
+type panelStore struct {
+	path string
+	log  *slog.Logger
 
-func loadGeometry(dir string) panelGeometry {
-	var g panelGeometry
-	b, err := os.ReadFile(geometryPath(dir))
+	mu    sync.Mutex
+	state panelState
+}
+
+func newPanelStore(dir string, log *slog.Logger) *panelStore {
+	st := &panelStore{path: filepath.Join(dir, "lyrics-window.json"), log: log}
+	if b, err := os.ReadFile(st.path); err == nil {
+		if json.Unmarshal(b, &st.state) != nil {
+			st.state = panelState{}
+		}
+	}
+	return st
+}
+
+func (s *panelStore) load() panelState {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.state
+}
+
+// Geometry records a finished move or resize.
+func (s *panelStore) Geometry(x, y, w, h int) {
+	s.mu.Lock()
+	s.state.X, s.state.Y, s.state.W, s.state.H = x, y, w, h
+	s.mu.Unlock()
+	s.write()
+}
+
+// Opacity records where the transparency slider was let go.
+func (s *panelStore) Opacity(v float64) {
+	s.mu.Lock()
+	s.state.Opacity = v
+	s.mu.Unlock()
+	s.write()
+}
+
+// write persists the state. It is called when a drag ends, so a failure is
+// worth a debug line and nothing more.
+func (s *panelStore) write() {
+	s.mu.Lock()
+	b, err := json.Marshal(s.state)
+	s.mu.Unlock()
 	if err != nil {
-		return g
+		return
 	}
-	if json.Unmarshal(b, &g) != nil {
-		return panelGeometry{}
-	}
-	return g
-}
-
-// saveGeometry writes the panel's place. It is called when a drag ends, so a
-// failure is worth a debug line and nothing more.
-func saveGeometry(dir string, log *slog.Logger) func(x, y, w, h int) {
-	return func(x, y, w, h int) {
-		b, err := json.Marshal(panelGeometry{X: x, Y: y, W: w, H: h})
-		if err != nil {
-			return
-		}
-		if err := os.WriteFile(geometryPath(dir), b, 0o644); err != nil {
-			log.Debug("could not remember the lyrics panel position", "err", err)
-		}
+	if err := os.WriteFile(s.path, b, 0o644); err != nil {
+		s.log.Debug("could not remember the lyrics panel state", "err", err)
 	}
 }
