@@ -341,53 +341,87 @@ func (w *LyricsWindow) drawCentred(bx, by, bw, bh float64, title, sub string) {
 	}
 }
 
+// footerMetrics is the geometry of the progress row, computed once and used
+// by both the painter and the hit test - the rail you can grab is then exactly
+// the rail you can see, including as the clock digits change width.
+func (w *LyricsWindow) footerMetrics() (railX, railW, midY, colW float64, known bool) {
+	face := w.fonts.face(regular, w.px(10.5))
+	m := w.px(lyrMargin)
+	cx, cw := m, float64(w.win.w)-2*m
+	cardBottom := float64(w.win.h) - m
+
+	total := w.track.Duration
+	known = total > 0
+	colW = measure(face, "0:00")
+	if known {
+		colW = math.Max(colW, math.Max(
+			measure(face, formatClock(w.position(time.Now()))),
+			measure(face, formatClock(total))))
+	}
+
+	pad, gap := w.px(22), w.px(11)
+	midY = cardBottom - w.px(20)
+	railX = cx + pad + colW + gap
+	railW = cx + cw - pad - colW - gap - railX
+	return railX, railW, midY, colW, known
+}
+
 // drawFooter is the same progress row the overlay card uses, so the two
-// surfaces agree on what a playhead looks like.
+// surfaces agree on what a playhead looks like. Unlike the card's, this one is
+// a control: hovering thickens it and dragging scrubs the track.
 func (w *LyricsWindow) drawFooter(cx, cardBottom, cw float64, accent color.RGBA) {
 	p := w.paint
 	face := w.fonts.face(regular, w.px(10.5))
 	total := w.track.Duration
 	elapsed := w.position(time.Now())
 
-	known := total > 0
-	colW := measure(face, "0:00")
-	midY := cardBottom - w.px(20)
+	railX, railW, midY, _, known := w.footerMetrics()
 	pad := w.px(22)
 
 	if known {
 		el, tot := formatClock(elapsed), formatClock(total)
-		totalW := measure(face, tot)
-		colW = math.Max(colW, math.Max(measure(face, el), totalW))
+		// The elapsed clock reads the scrub target while dragging, which is
+		// what makes the rail usable: you can see where you are about to land.
+		col := colTextMuted
+		if w.scrubbing {
+			col = colText
+		}
 		baseline := midY + w.px(3.8)
-		drawText(p.dst, face, colTextMuted, cx+pad, baseline, el)
-		drawText(p.dst, face, colTextMuted, cx+cw-pad-totalW, baseline, tot)
+		drawText(p.dst, face, col, cx+pad, baseline, el)
+		drawText(p.dst, face, colTextMuted, cx+cw-pad-measure(face, tot), baseline, tot)
 	}
 
+	// The rail grows under the pointer. It is the only affordance saying this
+	// row can be dragged, so it has to be felt before it is understood.
 	h := w.px(4)
+	if w.railHot || w.scrubbing {
+		h = w.px(6)
+	}
 	rad := h / 2
-	gap := w.px(11)
-	x := cx + pad + colW + gap
-	ww := cx + cw - pad - colW - gap - x
 	y := midY - h/2
-	if ww <= h {
+	if railW <= h {
 		return
 	}
 
-	p.begin(x, y, ww, h)
-	p.roundRect(x, y, ww, h, rad)
+	p.begin(railX, y, railW, h)
+	p.roundRect(railX, y, railW, h, rad)
 	p.flat(colProgress)
 	if !known {
 		return
 	}
 
 	frac := clamp01(float64(elapsed) / float64(total))
-	fw := math.Max(ww*frac, h)
-	p.begin(x, y, fw, h)
-	p.roundRect(x, y, fw, h, rad)
-	p.linear(x, 0, x+ww, 0, scaleAlpha(premul(accent), 0.7), premul(lighten(accent, 0.25)))
+	fw := math.Max(railW*frac, h)
+	p.begin(railX, y, fw, h)
+	p.roundRect(railX, y, fw, h, rad)
+	p.linear(railX, 0, railX+railW, 0,
+		scaleAlpha(premul(accent), 0.7), premul(lighten(accent, 0.25)))
 
 	capR := w.px(3.6)
-	capX := math.Min(math.Max(x+fw, x+capR), x+ww-capR)
+	if w.railHot || w.scrubbing {
+		capR = w.px(5.4)
+	}
+	capX := math.Min(math.Max(railX+fw, railX+capR), railX+railW-capR)
 	glowR := capR * 2.8
 	p.begin(capX-glowR, midY-glowR, glowR*2, glowR*2)
 	p.circle(capX, midY, glowR)
@@ -439,6 +473,17 @@ func (w *LyricsWindow) hitZone(x, y int) zone {
 	if math.Hypot(fx-closeX, fy-closeY) <= closeR+w.px(4) {
 		return zoneClose
 	}
+
+	// The rail is a thin thing to hit, so the grab band is much taller than
+	// the rail is drawn, and reaches a little past both ends.
+	if railX, railW, midY, _, known := w.footerMetrics(); known && railW > 0 {
+		grab := w.px(11)
+		if fy > midY-grab && fy < midY+grab &&
+			fx > railX-w.px(6) && fx < railX+railW+w.px(6) {
+			return zoneRail
+		}
+	}
+
 	if fy < m+w.px(lyrHeaderH) {
 		return zoneHeader
 	}
@@ -458,6 +503,13 @@ func (w *LyricsWindow) onMouseDown(x, y int) {
 		return
 	case zoneGripCorner, zoneGripBottom:
 		w.drag = dragResize
+	case zoneRail:
+		// Pressing anywhere on the rail jumps there immediately rather than
+		// waiting for a drag; a click is just a drag of zero length.
+		w.drag = dragSeek
+		w.scrubbing = true
+		w.scrubTo(x)
+		w.dirty = true
 	case zoneHeader:
 		w.drag = dragMove
 	default:
@@ -473,13 +525,17 @@ func (w *LyricsWindow) onMouseMove(x, y int) {
 	if !w.win.visible {
 		return
 	}
-	hot := w.hitZone(x, y) == zoneClose
-	if hot != w.closeHot {
+	z := w.hitZone(x, y)
+	if hot := z == zoneClose; hot != w.closeHot {
 		w.closeHot = hot
 		w.dirty = true
 	}
+	if hot := z == zoneRail; hot != w.railHot {
+		w.railHot = hot
+		w.dirty = true
+	}
 	if w.drag == dragNone {
-		w.hover = w.hitZone(x, y)
+		w.hover = z
 		return
 	}
 
@@ -509,6 +565,10 @@ func (w *LyricsWindow) onMouseMove(x, y int) {
 			w.dirty = true
 		}
 
+	case dragSeek:
+		w.scrubTo(x)
+		w.dirty = true
+
 	case dragScroll:
 		if dy != 0 {
 			w.scrollTo = w.clampScroll(w.scrollTo - float64(dy))
@@ -523,11 +583,46 @@ func (w *LyricsWindow) onMouseUp() {
 	if w.drag == dragNone {
 		return
 	}
-	moved := w.drag == dragMove || w.drag == dragResize
+	mode := w.drag
 	w.drag = dragNone
 	releaseMouse()
-	if moved && w.opts.OnGeometry != nil {
-		w.opts.OnGeometry(w.win.x, w.win.y, w.win.w, w.win.h)
+
+	switch mode {
+	case dragMove, dragResize:
+		if w.opts.OnGeometry != nil {
+			w.opts.OnGeometry(w.win.x, w.win.y, w.win.w, w.win.h)
+		}
+	case dragSeek:
+		w.commitSeek()
+	}
+}
+
+// scrubTo moves the handle to a pointer position, in client coordinates.
+func (w *LyricsWindow) scrubTo(x int) {
+	railX, railW, _, _, known := w.footerMetrics()
+	if !known {
+		return
+	}
+	w.scrubPos = seekTarget(float64(x), railX, railW, w.track.Duration)
+}
+
+// commitSeek hands the dropped position to the daemon and adopts it locally,
+// so the rail stays where it was let go instead of springing back while the
+// request is in flight.
+func (w *LyricsWindow) commitSeek() {
+	if !w.scrubbing {
+		return
+	}
+	pos := w.scrubPos
+	w.scrubbing = false
+	w.track.Position = pos
+	w.track.PositionAt = time.Now()
+	w.seekHold = time.Now().Add(seekHoldFor)
+	w.manualTil = time.Time{} // let the highlight snap to the new spot
+	w.dirty = true
+
+	if w.opts.OnSeek != nil {
+		go w.opts.OnSeek(pos)
 	}
 }
 
@@ -551,7 +646,7 @@ func (w *LyricsWindow) applyCursor() bool {
 		setCursorShape(cursorSizeNWSE)
 	case zoneGripBottom:
 		setCursorShape(cursorSizeNS)
-	case zoneClose:
+	case zoneClose, zoneRail:
 		setCursorShape(cursorHand)
 	default:
 		setCursorShape(cursorArrow)

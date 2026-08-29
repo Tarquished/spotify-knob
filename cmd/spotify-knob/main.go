@@ -185,7 +185,9 @@ func run(cfgPath string, verbose, doAuth, noHotkey, statusOnly bool, pasteCode s
 		}
 	}()
 
-	panel := osd.NewLyrics(lyricsOptions(cfg, loadGeometry(dir), saveGeometry(dir, log)), log)
+	panelOpts := lyricsOptions(cfg, loadGeometry(dir), saveGeometry(dir, log))
+	panelOpts.OnSeek = func(pos time.Duration) { ctl.Seek(context.WithoutCancel(ctx), pos) }
+	panel := osd.NewLyrics(panelOpts, log)
 	lyr := newLyricsManager(ctl, panel, card,
 		lyrics.New(filepath.Join(dir, "lyrics"), log), log)
 
@@ -234,7 +236,9 @@ func run(cfgPath string, verbose, doAuth, noHotkey, statusOnly bool, pasteCode s
 		watchConfig(ctx, cfgPath, cfg, log, func(next config.Config) {
 			ctl.Reconfigure(controllerOptions(next))
 			card.Reconfigure(osdOptions(next))
-			panel.Reconfigure(lyricsOptions(next, panelGeometry{}, saveGeometry(dir, log)))
+			nextPanel := lyricsOptions(next, panelGeometry{}, saveGeometry(dir, log))
+			nextPanel.OnSeek = panelOpts.OnSeek
+			panel.Reconfigure(nextPanel)
 			gestures.Store(gestureFrom(next))
 		})
 	}()

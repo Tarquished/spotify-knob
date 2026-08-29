@@ -75,6 +75,11 @@ type LyricsOptions struct {
 	// OnGeometry is called after the user finishes a move or resize, so the
 	// caller can remember where the panel was left.
 	OnGeometry func(x, y, w, h int)
+
+	// OnSeek is called when the user drops the progress rail's handle, with
+	// the position they dropped it at. It may block: the panel calls it on
+	// its own goroutine.
+	OnSeek func(pos time.Duration)
 }
 
 // Lyrics panel geometry, in logical pixels before the display scale.
@@ -118,6 +123,7 @@ const (
 	zoneClose
 	zoneGripCorner
 	zoneGripBottom
+	zoneRail
 )
 
 // dragMode is what a held mouse button is currently doing.
@@ -128,6 +134,7 @@ const (
 	dragMove
 	dragResize
 	dragScroll
+	dragSeek
 )
 
 type lyricsCmdKind int
@@ -182,6 +189,15 @@ type LyricsWindow struct {
 	scrollTo  float64
 	manualTil time.Time
 	active    int
+
+	// Scrubbing the progress rail. seekHold is how long the position the user
+	// dropped the handle at outranks whatever the daemon reports: a poll can
+	// still be carrying the pre-seek playhead, and letting it win would snap
+	// the rail back under the cursor.
+	scrubbing bool
+	scrubPos  time.Duration
+	seekHold  time.Time
+	railHot   bool
 
 	// Input state.
 	drag        dragMode
@@ -428,6 +444,9 @@ func (w *LyricsWindow) apply(ctx context.Context, c lyricsCmd) {
 		w.opts = c.opts
 		w.opts.X, w.opts.Y, w.opts.W, w.opts.H = keep.X, keep.Y, keep.W, keep.H
 		w.opts.OnGeometry = keep.OnGeometry
+		if w.opts.OnSeek == nil {
+			w.opts.OnSeek = keep.OnSeek
+		}
 		w.frameDur = w.frameInterval()
 		w.dirty = true
 	case lcTrack:
@@ -467,6 +486,12 @@ func (w *LyricsWindow) close() {
 
 func (w *LyricsWindow) setTrack(ctx context.Context, t LyricsTrack) {
 	changed := t.URI != w.track.URI || t.Title != w.track.Title
+
+	// A reading that predates the seek the user just made is worse than no
+	// reading at all, so keep ours until the write has had time to land.
+	if !changed && time.Now().Before(w.seekHold) {
+		t.Position, t.PositionAt = w.track.Position, w.track.PositionAt
+	}
 	w.track = t
 	if changed {
 		w.doc, w.state = nil, docIdle
@@ -499,8 +524,17 @@ func (w *LyricsWindow) trackWithArt(url string) LyricsTrack {
 	return t
 }
 
-// position is the live playhead, extrapolated from the last reading.
+// seekHoldFor is how long a dropped handle outranks the daemon's reading. It
+// covers one poll round-trip with room to spare.
+const seekHoldFor = 2500 * time.Millisecond
+
+// position is the live playhead, extrapolated from the last reading. While the
+// rail is being dragged it is wherever the handle is, so the highlighted lyric
+// follows the scrub instead of the music.
 func (w *LyricsWindow) position(now time.Time) time.Duration {
+	if w.scrubbing {
+		return w.scrubPos
+	}
 	pos := w.track.Position
 	if w.track.Playing && !w.track.PositionAt.IsZero() {
 		pos += now.Sub(w.track.PositionAt)
@@ -569,6 +603,21 @@ func (w *LyricsWindow) clampScroll(v float64) float64 {
 		max = 0
 	}
 	return math.Min(math.Max(v, 0), max)
+}
+
+// seekTarget maps a pointer position along the rail onto a position in the
+// track. Kept free of the window so the arithmetic can be tested on its own.
+func seekTarget(x, railX, railW float64, dur time.Duration) time.Duration {
+	if railW <= 0 || dur <= 0 {
+		return 0
+	}
+	f := (x - railX) / railW
+	if f < 0 {
+		f = 0
+	} else if f > 1 {
+		f = 1
+	}
+	return time.Duration(f * float64(dur))
 }
 
 func indexAt(lines []LyricLine, pos time.Duration) int {

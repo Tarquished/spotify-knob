@@ -306,6 +306,18 @@ func (c *Client) SetVolume(ctx context.Context, percent int) error {
 	return err
 }
 
+// Seek moves the playhead. Spotify takes an absolute offset in
+// milliseconds; there is no relative form.
+func (c *Client) Seek(ctx context.Context, pos time.Duration) error {
+	ms := int(pos / time.Millisecond)
+	if ms < 0 {
+		ms = 0
+	}
+	q := url.Values{"position_ms": {strconv.Itoa(ms)}}
+	_, err := c.do(ctx, http.MethodPut, "/me/player/seek?"+q.Encode(), nil)
+	return err
+}
+
 // Next skips to the next track.
 func (c *Client) Next(ctx context.Context) error {
 	_, err := c.do(ctx, http.MethodPost, "/me/player/next", nil)

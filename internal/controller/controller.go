@@ -96,6 +96,11 @@ type Notifier interface {
 // so a stale GET cannot undo the volume we just set.
 const writeSettle = 3 * time.Second
 
+// seekSettle is the same idea for the playhead. A poll already in flight when
+// the user drags the progress rail would report the position from before the
+// seek, and letting that win makes the rail visibly snap back.
+const seekSettle = 2500 * time.Millisecond
+
 type Controller struct {
 	client *spotify.Client
 	log    *slog.Logger
@@ -111,6 +116,7 @@ type Controller struct {
 	flushPending bool // a flush is scheduled or running
 	lastFlush    time.Time
 	lastWrite    time.Time
+	lastSeek     time.Time
 	lastTrack    time.Time
 	backoff      time.Time // set from a 429 Retry-After
 	device       string
@@ -243,6 +249,7 @@ func (c *Controller) syncNow(ctx context.Context) (*spotify.PlayerState, error) 
 	c.supports = st.Device.SupportsVolume
 	c.playing = st.IsPlaying
 	c.track = st.Track()
+	prev := c.np
 	c.np = NowPlaying{
 		Title:      st.Title(),
 		Artist:     st.Artist(),
@@ -252,6 +259,14 @@ func (c *Controller) syncNow(ctx context.Context) (*spotify.PlayerState, error) 
 		Position:   st.Position(),
 		PositionAt: time.Now(),
 		Playing:    st.IsPlaying,
+	}
+	// A poll that was already in flight when the user seeked reports where the
+	// playhead used to be. Keep ours until the write has had time to land,
+	// otherwise the rail jumps back under the cursor.
+	if !c.lastSeek.IsZero() && time.Since(c.lastSeek) < seekSettle &&
+		prev.Title == c.np.Title {
+		c.np.Position = prev.Position
+		c.np.PositionAt = prev.PositionAt
 	}
 	if st.Item != nil {
 		c.np.URI = st.Item.URI
@@ -594,6 +609,35 @@ func (c *Controller) clearPending() {
 
 // Next and Previous are guarded only lightly: a knob press is deliberate, we
 // just refuse to forward machine-gun repeats.
+// Seek moves the playhead of the current track.
+//
+// The local reading is updated before the request goes out, not after: the
+// lyrics panel is drawing from it at up to 144fps, and waiting for a
+// round-trip would show the rail snapping back to the old spot for the length
+// of one API call.
+func (c *Controller) Seek(ctx context.Context, pos time.Duration) {
+	if pos < 0 {
+		pos = 0
+	}
+
+	c.mu.Lock()
+	if d := c.np.Duration; d > 0 && pos > d {
+		pos = d
+	}
+	c.np.Position = pos
+	c.np.PositionAt = time.Now()
+	c.lastSeek = time.Now()
+	np := c.np
+	c.mu.Unlock()
+
+	if err := c.client.Seek(ctx, pos); err != nil {
+		c.log.Warn("seek failed", "position", pos, "err", err)
+		c.noteErr(err)
+		return
+	}
+	c.log.Info("seeked", "position", pos.Round(time.Second), "track", np.Title)
+}
+
 func (c *Controller) Next(ctx context.Context) { c.trackCmd(ctx, "next") }
 
 func (c *Controller) Previous(ctx context.Context) { c.trackCmd(ctx, "previous") }
