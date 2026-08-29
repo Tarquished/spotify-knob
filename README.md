@@ -10,6 +10,8 @@ Bikin rotary knob di keyboard (LEOBOG Hi75C Pro) ngatur **volume Spotify doang**
 | **Alt + puter knob** | Buka antrean — lihat 4 lagu berikutnya, sekaligus pilih |
 | Pencet selagi antrean terbuka | Putar lagu yang dipilih |
 | **Ctrl + pencet knob** | Buka/tutup panel lirik yang ngikutin detik lagu |
+| Tarik baris progress di panel lirik | Lompat ke detik itu |
+| Tarik slider di header panel lirik | Atur transparansi panelnya |
 | Klik kartunya pakai mouse | Kartunya langsung hilang |
 | **Shift + puter knob** | Lolos ke Windows, jadi master volume biasa (escape hatch) |
 
@@ -86,7 +88,7 @@ Config ada di `%APPDATA%\spotify-knob\config.json` dan **udah keisi client ID + 
 | `osd.volume_hold_ms` | `1500` | Lama kartu volume nempel di layar |
 | `osd.track_hold_ms` | `3000` | Lama kartu ganti lagu nempel di layar |
 | `lyrics.enabled` | `true` | Matiin panel lirik sekalian |
-| `lyrics.opacity` | `0.94` | Transparansi panel, 0.5–1 |
+| `lyrics.opacity` | `0.94` | Transparansi awal panel, 0.4–1. Slider di panelnya nimpa ini dan disimpan terpisah |
 | `lyrics.scale` | `0` | `0` = ikut DPI sistem |
 | `lyrics.fps` | `0` | `0` = ikut refresh rate monitor |
 | `osd.fps` | `0` | `0` = ikut refresh rate monitor. Isi angka buat maksa (misal `60`) |
@@ -191,7 +193,7 @@ Lagu yang baru dipindah selalu mulai dari nol — riwayat lagu nyimpen posisi te
 
 ## Panel lirik
 
-Ctrl + pencet knob, dan muncul panel melayang yang nampilin lirik lagu yang lagi jalan, **baris yang lagi dinyanyiin di-highlight** ngikutin detiknya. Panelnya always-on-top, agak transparan, bisa digeser (tarik bagian header), bisa diresize (tarik pojok kanan-bawah), dan posisi terakhirnya diinget. Pencet Ctrl + knob lagi, atau klik tombol × di pojok, buat nutup.
+Ctrl + pencet knob, dan muncul panel melayang yang nampilin lirik lagu yang lagi jalan, **baris yang lagi dinyanyiin di-highlight** ngikutin detiknya. Panelnya always-on-top, bisa digeser (tarik bagian header), bisa diresize (tarik pojok kanan-bawah), **transparansinya diatur pakai slider di header**, dan **baris progress di bawahnya bisa ditarik buat lompat ke detik mana pun**. Posisi, ukuran, dan transparansi terakhirnya diinget. Pencet Ctrl + knob lagi, atau klik tombol × di pojok, buat nutup.
 
 Kalau lagunya nggak punya lirik, panelnya **nggak jadi kebuka** — yang muncul cuma kartu kecil di bawah yang bilang "No lyrics for this track".
 
@@ -241,6 +243,28 @@ Beberapa keputusan yang mungkin nggak kelihatan:
 - **Baris yang lewat lebih redup dari baris yang belum.** Yang udah lewat 26% opacity, yang aktif 97%, yang belum 50%. Ditambah gradasi lembut di tepi atas dan bawah body, jadi baris yang keluar layar meleleh bukan kepotong.
 - **Jeda instrumental digambar sebagai tiga titik berdenyut**, bukan dikosongin. Break 20 detik tanpa itu bakal kelihatan kayak panelnya nge-hang.
 - **Warna cuma di satu tempat**: batang aksen kecil di sebelah kiri baris yang aktif. Kata-katanya sendiri tetep putih — nge-warnain teksnya bikin susah dibaca tanpa nambah informasi.
+
+### Seek: tarik baris progress-nya
+
+Baris progress di panel itu bukan cuma indikator — dia kontrol. Tarik handle-nya buat lompat ke detik mana pun; pencet di titik mana pun langsung lompat ke situ, karena klik itu cuma drag sepanjang nol.
+
+Tiga hal yang bikin ini kerasa solid bukan lemot:
+
+- **Selagi handle-nya ditahan, panelnya nampilin posisi handle, bukan posisi musiknya.** Jadi baris lirik yang di-highlight ikut gerak sambil lo nyeret. Lo bisa baca dulu sampai nemu baris yang lo mau, baru dilepas. Jam di kiri juga ikut nunjukin target, bukan posisi sekarang.
+- **Posisi yang dilepas langsung dipakai lokal, sebelum request-nya dikirim.** Panelnya menggambar dari bacaan itu sampai 144fps; nunggu roundtrip API bakal keliatan sebagai rail yang mental balik selama satu panggilan API.
+- **Polling yang lagi jalan pas lo seek itu bawa posisi sebelum seek.** Controller dan panel sama-sama nahan bacaannya sendiri 2,5 detik sesudah seek, kalau nggak rail-nya keliatan lompat balik ke bawah kursor. Penahannya diikat ke lagunya, jadi ganti lagu langsung ngebatalin.
+
+Rail-nya juga membesar pas disentuh kursor dan kursornya berubah jadi tangan — itu satu-satunya petunjuk visual kalau baris itu bisa ditarik.
+
+### Slider transparansi
+
+Dulu transparansi cuma angka di config yang harus diedit terus di-reload. Sekarang ada slider-nya di header, di bawah tombol ×. Ditarik, frame berikutnya langsung dikomposisi di nilai baru — itu satu-satunya cara jujur milih transparansi, karena yang lo lihat itu ya benda yang lagi lo atur.
+
+- **Batas bawahnya 0,40, bukan nol.** Di bawah itu tulisannya berhenti kebaca di atas background terang, jadi slider maupun config nggak nawarin ke situ.
+- **Badge sumbernya ganti jadi angka persen selagi ditarik**, dan nempel 1,5 detik setelah dilepas — konfirmasi kalau nilai yang lo lepas itu nilai yang nyangkut.
+- Nilainya disimpan di `lyrics-window.json` bareng posisi dan ukuran, **bukan** ditulis balik ke `config.json`. Itu nilai-nilai yang lo set dengan cara nyeret; nulisnya ke file yang lo edit tangan bakal bikin tiap seretan kelihatan kayak perubahan config buat hot reload-nya. Edit `config.json` langsung tetap menang, karena itu orang menyatakan maksud, bukan mindahin window.
+
+Dua kontrol ini sama-sama pakai satu disiplin: `headerMetrics` dan `footerMetrics` menghitung posisi kontrolnya sekali, dan penggambar maupun hit-test-nya baca dari situ. Jadi yang kelihatan dan yang bisa diklik nggak akan pernah beda — kelas bug yang gampang banget kejadian kalau dua-duanya menghitung sendiri-sendiri.
 
 ### Kenapa panelnya nggak ngerebut fokus
 
@@ -391,6 +415,8 @@ Yang dicover:
 - **Milih rekaman** — durasi ngalahin judul yang sama, ber-timestamp ngalahin teks polos, dan lagu yang jelas salah ditolak daripada ditampilin
 - **Buka atau nolak** — lagu tanpa lirik nggak pernah buka panel kosong, cache dipakai tanpa nyentuh jaringan, lookup lambat buka panel loading terus keisi, dan lagu tanpa lirik nggak nutup panel yang udah kebuka
 - **Panel nggak buka sendiri** — hasil lookup yang mendarat setelah panelnya ditutup dibuang, ganti lagu di balik panel tertutup nggak munculin apa-apa, dan pencetan kedua selagi lookup jalan bikin batal bukan buka dua kali
+- **Seek** — pemetaan posisi kursor ke detik lagu termasuk yang keluar ujung rail, highlight ngikutin handle selagi ditarik, bacaan basi dari polling nggak bisa nimpa seek yang baru, penahannya nggak kebawa ke lagu berikutnya, dan seek dilaporin tepat sekali
+- **Slider transparansi** — pemetaannya bolak-balik konsisten (nilai → posisi handle → nilai yang sama), nilai di luar batas dijepit, dan opacity yang belum diset nggak kebaca sebagai "tembus pandang"
 - **Config** — BOM dari Notepad ditoleransi, UTF-16 ditolak dengan pesan yang jelas, key yang absen tetep pakai default
 - **Riwayat lagu** — mundur berkali-kali jalan beneran, cabang baru ngebuang riwayat di depannya, dan ada batas maksimal
 - **Warna aksen** — nolak background gelap, jatuh ke hijau Spotify kalau cover-nya monokrom
@@ -508,6 +534,9 @@ Dependency cuma `golang.org/x/image` (rasterizer vektor + rasterisasi font), sis
 | Liriknya ada typo-nya | Isinya dari kontributor komunitas LRCLIB, bukan dari label |
 | Liriknya meleset beberapa detik | Timestamp-nya ikut versi rekaman yang dipilih. Kalau lagunya punya beberapa upload di LRCLIB, yang durasinya paling dekat yang menang |
 | Panel liriknya kegeser ke luar layar | Posisinya diinget di `%APPDATA%\spotify-knob\lyrics-window.json` — hapus file itu buat balik ke default |
+| Panel liriknya kelewat transparan | Tarik slider di header ke kanan, atau hapus `lyrics-window.json` buat balik ke nilai config |
+| Rail progress ditarik tapi lagunya nggak lompat | Cek log buat baris `seeked`; kalau nggak ada, kemungkinan Spotify nggak punya device aktif |
+| Daemon kayak jalan tapi kartunya nggak pernah muncul | Kemungkinan port 8888 udah dipegang daemon lain. Sekarang ini kecatat sebagai `http listener failed` di log |
 | Judul lagu next sempat salah lalu berubah | Antreannya udah basi (biasanya gara-gara shuffle). Watcher-nya emang sengaja ngebenerin sendiri |
 | Album art nggak nongol | Cover diambil dari `i.scdn.co`; kalau diblokir, kartunya pakai placeholder piringan hitam |
 | Edit config nggak ngefek | Cek baris `config reloaded` di log. Kalau nggak ada, lihat `config_path` di `-status` — daemon mungkin baca file lain dari yang lo edit |
