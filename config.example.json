@@ -1,0 +1,31 @@
+{
+  "client_id": "PASTE_YOUR_CLIENT_ID",
+  "client_secret": "PASTE_YOUR_CLIENT_SECRET",
+  "port": 8888,
+  "volume_step": 5,
+  "debounce_ms": 100,
+  "resync_seconds": 10,
+  "track_guard_ms": 150,
+  "double_press_ms": 0,
+  "long_press_ms": 450,
+  "peek_linger_ms": 1200,
+  "peek_browse_ms": 1800,
+  "peek_gesture": "alt-turn",
+  "hotkeys": true,
+  "osd": {
+    "enabled": true,
+    "scale": 1.0,
+    "position": "bottom-center",
+    "hide_when_fullscreen": true,
+    "dismiss_on_click": true,
+    "volume_hold_ms": 1500,
+    "track_hold_ms": 3000,
+    "fps": 0
+  },
+  "lyrics": {
+    "enabled": true,
+    "opacity": 0.94,
+    "scale": 0,
+    "fps": 0
+  }
+}
