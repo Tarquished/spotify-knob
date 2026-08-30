@@ -79,7 +79,7 @@ func (w *LyricsWindow) render() {
 // headerMetrics places the header's two controls. Like footerMetrics, it is
 // shared by the painter and the hit test so what is drawn and what is
 // clickable can never drift apart.
-func (w *LyricsWindow) headerMetrics() (closeX, closeY, closeR, sliderX, sliderW, sliderY float64) {
+func (w *LyricsWindow) headerMetrics() (closeX, closeY, closeR, openX, sliderX, sliderW, sliderY float64) {
 	m := w.px(lyrMargin)
 	cx, cw := m, float64(w.win.w)-2*m
 	inset := w.px(18)
@@ -88,10 +88,15 @@ func (w *LyricsWindow) headerMetrics() (closeX, closeY, closeR, sliderX, sliderW
 	closeX = cx + cw - inset - closeR
 	closeY = m + w.px(19) + closeR
 
+	// The "open in Spotify" icon sits on the close button's own row, the
+	// same size and the same hover treatment - one small icon toolbar,
+	// rather than a second control competing with the title underneath it.
+	openX = closeX - closeR*2 - w.px(6)
+
 	sliderW = w.px(lyrSliderW)
 	sliderX = cx + cw - inset - sliderW
 	sliderY = m + w.px(58)
-	return closeX, closeY, closeR, sliderX, sliderW, sliderY
+	return closeX, closeY, closeR, openX, sliderX, sliderW, sliderY
 }
 
 func (w *LyricsWindow) drawHeader(cx, cy, cw float64, accent color.RGBA) {
@@ -107,24 +112,38 @@ func (w *LyricsWindow) drawHeader(cx, cy, cw float64, accent color.RGBA) {
 	badgeFace := fs.face(bold, w.px(8))
 
 	textX := cx + inset + thumb + w.px(14)
-	closeX, closeY, closeR, sliderX, sliderW, sliderY := w.headerMetrics()
+	closeX, closeY, closeR, openX, sliderX, sliderW, sliderY := w.headerMetrics()
+	showOpen := w.track.URI != ""
 
-	// The badge names where the words came from, and gives way to the opacity
-	// readout while the slider is being dragged - the number matters more in
-	// that moment than the provider does.
+	// The badge normally names where the words came from. It gives way to the
+	// opacity readout while the slider drags, and to a hint of what the icon
+	// beside it does while that icon is hovered - the same slot doing three
+	// jobs rather than three separate labels competing for room.
 	label, labelCol := w.sourceLabel(), rgba(255, 255, 255, 0.30)
-	if w.sliding || time.Now().Before(w.sliderShow) {
+	switch {
+	case w.sliding || time.Now().Before(w.sliderShow):
 		label = fmt.Sprintf("%d%%", int(w.opacity()*100+0.5))
 		labelCol = premul(accent)
+	case w.openHot && showOpen:
+		label = "OPEN IN SPOTIFY"
+		labelCol = premul(accent)
+	}
+
+	// Everything in this row reads right-to-left off the icon toolbar: the
+	// open icon (when there is a track to open) sits left of close, and the
+	// badge sits left of whichever of those is leftmost.
+	rightEdge := closeX - closeR
+	if showOpen {
+		rightEdge = openX - closeR
 	}
 	badgeW := 0.0
 	if label != "" {
 		badgeW = measureTracked(badgeFace, label, w.px(0.9)) + w.px(14)
 		drawTracked(p.dst, badgeFace, labelCol,
-			closeX-closeR-badgeW, cy+w.px(34), label, w.px(0.9))
+			rightEdge-badgeW, cy+w.px(34), label, w.px(0.9))
 	}
 
-	textMax := closeX - closeR - badgeW - w.px(12) - textX
+	textMax := rightEdge - badgeW - w.px(12) - textX
 	title := w.track.Title
 	if title == "" {
 		title = "Nothing playing"
@@ -137,8 +156,10 @@ func (w *LyricsWindow) drawHeader(cx, cy, cw float64, accent color.RGBA) {
 	}
 
 	w.drawClose(closeX, closeY, closeR)
+	if showOpen {
+		w.drawOpenIcon(openX, closeY, closeR, accent)
+	}
 	w.drawOpacitySlider(sliderX, sliderY, sliderW, accent)
-	w.drawOpenButton(accent)
 
 	div := cy + w.px(lyrHeaderH) - w.px(1)
 	p.begin(cx+inset, div, cw-2*inset, 1)
@@ -146,71 +167,59 @@ func (w *LyricsWindow) drawHeader(cx, cy, cw float64, accent color.RGBA) {
 	p.flat(colLyrDivide)
 }
 
-// openButtonRect places the "Open in Spotify" button, and is the single
-// source of truth both drawOpenButton and hitZone read from - the button you
-// see and the button you can click can never end up in different places.
-//
-// It hugs its own label rather than filling a fixed box, so the button never
-// overlaps the opacity slider's column on the right even when the panel is
-// as narrow as lyrMinW allows: everything past what fits between the artist
-// text and the slider is dropped through truncate, same as the title above it.
-func (w *LyricsWindow) openButtonRect() (x, y, ww, hh float64, label string, show bool) {
-	if w.track.URI == "" {
-		return 0, 0, 0, 0, "", false
+// drawOpenIcon is the "open in Spotify" control: a small icon button on the
+// close button's own row, same size and same hover-fills-the-circle
+// treatment. The first version of this was a labelled pill under the artist
+// name; it was the one thing in the panel that looked like a UI control
+// bolted on rather than belonging to it, so it is an icon now, the way close
+// and the opacity slider already are.
+func (w *LyricsWindow) drawOpenIcon(cx, cy, r float64, accent color.RGBA) {
+	p := w.paint
+	col := colLyrClose
+	if w.openHot {
+		p.begin(cx-r, cy-r, r*2, r*2)
+		p.circle(cx, cy, r)
+		p.flat(rgba(255, 255, 255, 0.12))
+		col = premul(accent)
 	}
-	m := w.px(lyrMargin)
-	cx := m
-	inset := w.px(18)
-	thumb := w.px(lyrThumb)
-	textX := cx + inset + thumb + w.px(14)
-
-	_, _, _, sliderX, _, _ := w.headerMetrics()
-	maxW := sliderX - w.px(10) - textX
-	pad := w.px(lyrOpenBtnPadX)
-	if maxW < pad*2+w.px(20) {
-		return 0, 0, 0, 0, "", false // too narrow to bother at extreme sizes
-	}
-
-	face := w.fonts.face(semibold, w.px(10.5))
-	// Plain text, deliberately: an arrow glyph (U+2197 etc.) rendered as a
-	// tofu box the first time this was tried, because the opentype face here
-	// is not guaranteed to carry every Unicode arrow. Plain ASCII has no such
-	// failure mode.
-	label = truncate(face, "Open in Spotify", maxW-pad*2)
-	hh = w.px(lyrOpenBtnH)
-	ww = measure(face, label) + pad*2
-	y = m + w.px(58)
-	return textX, y, ww, hh, label, true
+	drawArrowGlyph(p, cx, cy, r*0.62, col)
 }
 
-// drawOpenButton is a small pill button under the artist name. Like the
-// opacity slider, it is drawn at the panel's own opacity, so it dims along
-// with everything else rather than punching through it.
-func (w *LyricsWindow) drawOpenButton(accent color.RGBA) {
-	x, y, ww, hh, label, show := w.openButtonRect()
-	if !show {
-		return
+// drawArrowGlyph draws a small diagonal arrow, built from two vector strokes
+// rather than a font glyph. The first attempt at this icon used a Unicode
+// arrow character as text; it rendered as a tofu box, because nothing
+// guarantees the loaded face carries that codepoint. A shape built from the
+// same polygon primitives the rest of the panel already uses has no such
+// failure mode.
+//
+// The arrow is built pointing along +x in its own local space, tip at the
+// origin, then rotated -45 degrees into place - simpler to get symmetric
+// than reasoning about the diagonal directly.
+func drawArrowGlyph(p *painter, cx, cy, r float64, col color.RGBA) {
+	const c45 = 0.70710678
+	rot := func(x, y float64) (float64, float64) {
+		return cx + c45*(x+y), cy + c45*(y-x)
 	}
-	p := w.paint
-	rad := hh / 2
 
-	bg := scaleAlpha(premul(accent), 0.16)
-	border := scaleAlpha(premul(accent), 0.32)
-	if w.openHot {
-		bg = scaleAlpha(premul(accent), 0.30)
-		border = scaleAlpha(premul(accent), 0.55)
-	}
-	p.begin(x, y, ww, hh)
-	p.roundRect(x, y, ww, hh, rad)
-	p.flat(bg)
-	p.begin(x, y, ww, hh)
-	p.roundRect(x, y, ww, hh, rad)
-	p.roundRectRev(x+1, y+1, ww-2, hh-2, rad-1)
-	p.flat(border)
+	shaftLen := r * 0.95
+	headLen := r * 0.66
+	headHalf := r * 0.5
+	half := math.Max(r*0.16, 1)
 
-	face := w.fonts.face(semibold, w.px(10.5))
-	tw := measure(face, label)
-	drawText(p.dst, face, colText, x+(ww-tw)/2, y+hh*0.7, label)
+	p.begin(cx-r, cy-r, r*2, r*2)
+	x0, y0 := rot(-shaftLen, -half)
+	x1, y1 := rot(-shaftLen, half)
+	x2, y2 := rot(shaftLen-headLen, half)
+	x3, y3 := rot(shaftLen-headLen, -half)
+	p.polygon(x0, y0, x1, y1, x2, y2, x3, y3)
+	p.flat(col)
+
+	p.begin(cx-r, cy-r, r*2, r*2)
+	tx, ty := rot(shaftLen, 0)
+	bx1, by1 := rot(shaftLen-headLen, headHalf)
+	bx2, by2 := rot(shaftLen-headLen, -headHalf)
+	p.polygon(tx, ty, bx1, by1, bx2, by2)
+	p.flat(col)
 }
 
 // drawOpacitySlider is the transparency control: a half-filled disc for a
@@ -603,19 +612,18 @@ func (w *LyricsWindow) hitZone(x, y int) zone {
 		return zoneGripCorner // the right edge resizes width the same way
 	}
 
-	closeX, closeY, closeR, sliderX, sliderW, sliderY := w.headerMetrics()
+	closeX, closeY, closeR, openX, sliderX, sliderW, sliderY := w.headerMetrics()
 	if math.Hypot(fx-closeX, fy-closeY) <= closeR+w.px(4) {
 		return zoneClose
+	}
+	if w.track.URI != "" && math.Hypot(fx-openX, fy-closeY) <= closeR+w.px(4) {
+		return zoneOpenSpotify
 	}
 	// The slider's grab band reaches past both ends and well above and below
 	// the 3px track, which is far too thin to aim at.
 	if fy > sliderY-w.px(10) && fy < sliderY+w.px(10) &&
 		fx > sliderX-w.px(12) && fx < sliderX+sliderW+w.px(8) {
 		return zoneOpacity
-	}
-	if bx, by, bw, bh, _, show := w.openButtonRect(); show &&
-		fx >= bx && fx <= bx+bw && fy >= by && fy <= by+bh {
-		return zoneOpenSpotify
 	}
 
 	// The rail is a thin thing to hit, so the grab band is much taller than
@@ -840,7 +848,7 @@ func (w *LyricsWindow) onMouseUp() {
 // The change is live: the next frame is composed at the new value, which is
 // the only honest way to pick a transparency.
 func (w *LyricsWindow) slideTo(x int) {
-	_, _, _, sliderX, sliderW, _ := w.headerMetrics()
+	_, _, _, _, sliderX, sliderW, _ := w.headerMetrics()
 	w.opts.Opacity = opacityAt(float64(x), sliderX, sliderW)
 	w.dirty = true
 }

@@ -256,45 +256,32 @@ func TestOpenTrackPassesTheCurrentURI(t *testing.T) {
 	}
 }
 
-// The open button hides itself, rather than sitting there doing nothing,
+// The open icon hides itself, rather than sitting there doing nothing,
 // when there is no track to open.
-func TestOpenButtonRectHidesWithNoTrack(t *testing.T) {
+func TestOpenIconHiddenWithNoTrack(t *testing.T) {
 	w := panelWithLyrics(nil)
 	w.track.URI = ""
-	if _, _, _, _, _, show := w.openButtonRect(); show {
-		t.Fatal("no URI should mean no button")
+	_, closeY, closeR, openX, _, _, _ := w.headerMetrics()
+	if got := w.hitZone(int(openX), int(closeY+closeR)); got == zoneOpenSpotify {
+		t.Fatal("no URI should mean no icon to hit")
 	}
 }
 
-func TestOpenButtonRectShowsWithATrack(t *testing.T) {
-	w := panelWithLyrics(nil)
-	x, y, ww, hh, label, show := w.openButtonRect()
-	if !show {
-		t.Fatal("a track with a URI should show the button")
-	}
-	if ww <= 0 || hh <= 0 {
-		t.Fatalf("want a positive-sized button, got %vx%v", ww, hh)
-	}
-	if label == "" {
-		t.Fatal("want a non-empty label")
-	}
-	if x <= 0 || y <= 0 {
-		t.Fatalf("want a positive position, got %v,%v", x, y)
-	}
-}
+// hitZone must agree with the icon's own geometry: a point inside the drawn
+// circle is clickable, and a point well outside it is not mistaken for it.
+func TestHitZoneMatchesTheOpenIcon(t *testing.T) {
+	w := panelWithLyrics(nil) // sets a track URI
+	closeX, closeY, closeR, openX, _, _, _ := w.headerMetrics()
 
-// hitZone must agree with openButtonRect: a point inside the drawn button is
-// clickable, and a point outside it is not mistaken for the button.
-func TestHitZoneMatchesTheOpenButton(t *testing.T) {
-	w := panelWithLyrics(nil)
-	x, y, ww, hh, _, show := w.openButtonRect()
-	if !show {
-		t.Fatal("expected the button to be shown")
+	if got := w.hitZone(int(openX), int(closeY)); got != zoneOpenSpotify {
+		t.Fatalf("the icon's own centre should hit zoneOpenSpotify, got %v", got)
 	}
-	if got := w.hitZone(int(x+ww/2), int(y+hh/2)); got != zoneOpenSpotify {
-		t.Fatalf("the button's own centre should hit zoneOpenSpotify, got %v", got)
+	if got := w.hitZone(int(openX-closeR*3), int(closeY)); got == zoneOpenSpotify {
+		t.Fatal("well to the left of the icon should not hit it")
 	}
-	if got := w.hitZone(int(x-20), int(y+hh/2)); got == zoneOpenSpotify {
-		t.Fatal("well to the left of the button should not hit it")
+	// The two icons sit close together on purpose; they still must not
+	// answer for each other.
+	if got := w.hitZone(int(closeX), int(closeY)); got != zoneClose {
+		t.Fatalf("the close button's own centre should still hit zoneClose, got %v", got)
 	}
 }

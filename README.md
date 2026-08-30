@@ -13,7 +13,7 @@ Bikin rotary knob di keyboard (LEOBOG Hi75C Pro) ngatur **volume Spotify doang**
 | Tarik baris progress di panel lirik | Lompat ke detik itu |
 | Tarik slider di header panel lirik | Atur transparansi panelnya |
 | Klik dua kali baris lirik | Lompat ke detik baris itu |
-| Klik "Open in Spotify" di panel lirik | Buka lagu itu di aplikasi/web Spotify |
+| Klik ikon panah di header panel lirik | Buka lagu itu di aplikasi/web Spotify |
 | Klik kartunya pakai mouse | Kartunya langsung hilang |
 | **Shift + puter knob** | Lolos ke Windows, jadi master volume biasa (escape hatch) |
 
@@ -274,13 +274,19 @@ Sama kayak tarik rail, cuma lebih presisi: klik dua kali baris mana pun dan lagu
 
 Klik di baris yang beda dari klik sebelumnya, atau klik keduanya kelewat lambat, dianggap dua klik tunggal biasa — sama sekali nggak ganggu drag-scroll yang udah ada. Baris yang liriknya nggak ber-timestamp (`docState` bukan `docReady` yang synced) nggak bisa di-double-click sama sekali, karena nggak ada detik yang bisa dituju. Lagu yang durasinya nggak diketahui juga nggak bisa — gerbang yang sama yang nyembunyiin rail progress.
 
-### Tombol "Open in Spotify"
+### Ikon "buka di Spotify"
 
-Ada di header, di bawah nama artis. Ditekan, daemon nyoba buka `spotify:track:...` URI-nya lewat `ShellExecuteW` — persis kayak lo dobel klik shortcut ke situ: kalau app Spotify-nya kepasang, dia yang kebuka dan langsung nunjukin lagunya; kalau nggak, fallback ke `https://open.spotify.com/track/...` di browser default.
+Ditekan, daemon nyoba buka `spotify:track:...` URI-nya lewat `ShellExecuteW` — persis kayak lo dobel klik shortcut ke situ: kalau app Spotify-nya kepasang, dia yang kebuka dan langsung nunjukin lagunya; kalau nggak, fallback ke `https://open.spotify.com/track/...` di browser default. Ikonnya cuma muncul kalau ada lagu yang lagi diketahui (ada URI-nya) — bukan kontrol yang keliatan tapi nggak ngapa-ngapain kalau diklik.
 
-Tombolnya cuma muncul kalau ada lagu yang lagi diketahui (ada URI-nya) — bukan tombol yang keliatan tapi nggak ngapa-ngapain kalau diklik. Sempet ada satu bug pas awal: labelnya dikasih panah "↗" di belakang teksnya, dan itu nggak kerender di font yang dipakai, jadinya kotak kosong. Diganti teks polos "Open in Spotify" tanpa simbol apa pun — nggak ada risiko font nggak support karakter itu.
+**Versi pertamanya jelek**, dan itu ditunjukin langsung. Dulu dia pil berlabel teks "Open in Spotify" yang nangkring sendirian di bawah nama artis — satu-satunya elemen di panel yang kelihatan kayak kontrol UI yang ditempel belakangan, bukan bagian dari desainnya. Semua kontrol lain di panel ini (tombol ×, slider transparansi, rail progress) itu ikon kecil yang cuma bereaksi ke hover, tanpa label yang nempel terus. Pil teks itu satu-satunya yang keluar dari bahasa itu.
 
-Terbukti live: diklik pas lagu "Matilda" lagi main, dan window Spotify-nya (ditangkep pakai `PrintWindow` biar kebaca walau ketutup app lain) langsung nunjukin sidebar "Matilda — Harry Styles" kebuka dengan track-nya di-highlight di daftar.
+Sekarang jadi **ikon panah kecil sebaris sama tombol ×**, ukuran dan gaya hover-nya sama persis (lingkaran yang keisi pas disentuh kursor). Panahnya digambar pakai primitif vektor yang sama kayak silang tombol ×, bukan glyph font — percobaan pertama makai karakter panah Unicode di teksnya, dan itu nggak kerender di font yang dipakai, jadinya kotak kosong (tofu box). Bentuk vektor nggak punya kegagalan kayak gitu.
+
+Discoverability-nya nggak dikorbankan: pas kursor nempel di ikonnya, badge sumber lirik di header (yang biasanya nulis "LRCLIB · SYNCED") ganti sebentar jadi "OPEN IN SPOTIFY" — slot yang sama juga dipakai buat nunjukin persentase pas slider transparansi ditarik. Satu slot, tiga peran, tergantung apa yang lagi disentuh.
+
+`headerMetrics()` yang nentuin posisi ikon ini juga yang dipakai `hitZone` buat nge-tes klik — disiplin yang sama kayak rail progress dan slider: apa yang kelihatan dan apa yang bisa diklik nggak akan pernah beda tempat.
+
+Terbukti live: diklik pas lagu lagi main, `hitZone` kekonfirmasi resolve ke ikon yang benar lewat log, dan mekanisme `ShellExecuteW`-nya sendiri (nggak berubah dari versi pil) udah dibuktikan sebelumnya buka window Spotify langsung ke halaman lagunya (ditangkep pakai `PrintWindow` biar kebaca walau ketutup app lain).
 
 ### Kenapa panelnya nggak ngerebut fokus
 

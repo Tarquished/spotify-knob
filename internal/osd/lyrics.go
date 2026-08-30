@@ -117,11 +117,6 @@ const (
 	// the slider will not go there and neither will the config.
 	lyrOpacityMin = 0.40
 
-	// The "Open in Spotify" button sits under the artist name, on the left
-	// where the opacity slider's row on the right leaves room.
-	lyrOpenBtnH    = 20
-	lyrOpenBtnPadX = 10
-
 	// lyrDoubleClickWindow is how close two clicks on the same lyric line
 	// have to land to count as a double-click and seek there. Windows' own
 	// GetDoubleClickTime defaults to 500ms; this stays a little under it so
