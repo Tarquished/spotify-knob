@@ -40,29 +40,35 @@ func (w *LyricsWindow) render() {
 
 	// A soft ring instead of a blurred shadow. The panel is resizable, and a
 	// real drop shadow would mean re-blurring a 900x1100 mask on every frame
-	// of a corner drag; three nested strokes cost nothing and read as depth
-	// against both bright and dark backgrounds.
+	// of a corner drag; three nested strokes cost nothing to draw and read as
+	// depth against both bright and dark backgrounds - and cost nothing to
+	// redraw either, since the ring shapes are cached (see lyricscache.go).
 	for i := 3; i >= 1; i-- {
 		f := float64(i)
-		p.begin(cx-f, cy-f, cw+2*f, ch+2*f)
-		p.roundRect(cx-f, cy-f, cw+2*f, ch+2*f, rad+f)
-		p.roundRectRev(cx-f+1, cy-f+1, cw+2*f-2, ch+2*f-2, rad+f-1)
-		p.flat(rgba(0, 0, 0, 0.34/f))
+		p.blitMask(w.shadowRingMask(f, cx, cy, cw, ch, rad), rgba(0, 0, 0, 0.34/f))
 	}
 
+	bg := w.cardBackground(int(math.Ceil(cw)), int(math.Ceil(ch)))
 	p.begin(cx, cy, cw, ch)
 	p.roundRect(cx, cy, cw, ch, rad)
-	p.linear(cx, cy, cx, cy+ch, colCardTop, colCardBottom)
+	if bg != nil {
+		p.picture(bg, cx, cy, 1)
+	} else {
+		p.linear(cx, cy, cx, cy+ch, colCardTop, colCardBottom)
+	}
 
-	// Accent bloom behind the header, anchored on the cover.
-	p.begin(cx, cy, cw, ch)
-	p.roundRect(cx, cy, cw, ch, rad)
-	p.radial(cx+w.px(48), cy+w.px(30), w.px(240), scaleAlpha(premul(accent), 0.20))
+	// Accent bloom behind the header, anchored on the cover. It breathes
+	// gently with the song's own pace when there is a pace worth echoing
+	// (see pulsePeriodFor); otherwise it just sits at its base brightness,
+	// same as before this existed.
+	bloomAlpha := 0.20
+	if w.pulsePeriod > 0 {
+		bloomAlpha = 0.16 + 0.09*pulseBreath(w.position(time.Now()), w.pulsePeriod)
+	}
+	p.blitMask(w.bloomMask(cx+w.px(48), cy+w.px(30), w.px(240), cx, cy, cw, ch, rad),
+		scaleAlpha(premul(accent), bloomAlpha))
 
-	p.begin(cx, cy, cw, ch)
-	p.roundRect(cx, cy, cw, ch, rad)
-	p.roundRectRev(cx+1, cy+1, cw-2, ch-2, rad-1)
-	p.flat(colBorder)
+	p.blitMask(w.borderRingMask(cx, cy, cw, ch, rad), colBorder)
 
 	edge := w.px(1.2)
 	p.begin(cx, cy, cw, edge*2)
@@ -99,13 +105,22 @@ func (w *LyricsWindow) headerMetrics() (closeX, closeY, closeR, openX, sliderX, 
 	return closeX, closeY, closeR, openX, sliderX, sliderW, sliderY
 }
 
+// coverRect places the header's cover art. Shared by the painter and the hit
+// test - the same discipline headerMetrics and footerMetrics already use -
+// so the art you see is exactly the art you can click to toggle ambient mode.
+func (w *LyricsWindow) coverRect() (x, y, size float64) {
+	m := w.px(lyrMargin)
+	return m + w.px(18), m + w.px(13), w.px(lyrThumb)
+}
+
 func (w *LyricsWindow) drawHeader(cx, cy, cw float64, accent color.RGBA) {
 	p := w.paint
 	fs := w.fonts
 	inset := w.px(18)
 	thumb := w.px(lyrThumb)
 
-	w.drawCover(cx+inset, cy+w.px(13), thumb, accent)
+	artX, artY, artSize := w.coverRect()
+	w.drawCover(artX, artY, artSize, accent)
 
 	titleFace := fs.face(semibold, w.px(14.5))
 	artistFace := fs.face(regular, w.px(12))
@@ -306,6 +321,13 @@ func (w *LyricsWindow) drawCover(x, y, size float64, accent color.RGBA) {
 	p.roundRect(x, y, size, size, rad)
 	p.roundRectRev(x+1, y+1, size-2, size-2, rad-1)
 	p.flat(colArtEdge)
+
+	if w.coverHot {
+		p.begin(x, y, size, size)
+		p.roundRect(x, y, size, size, rad)
+		p.roundRectRev(x+1.5, y+1.5, size-3, size-3, rad-1.5)
+		p.flat(rgba(255, 255, 255, 0.55))
+	}
 }
 
 // drawClose is the dismiss button: a ring that fills in on hover, with an X.
@@ -408,10 +430,17 @@ func (w *LyricsWindow) drawBody(accent color.RGBA) {
 			p.flat(scaleAlpha(premul(accent), alpha*0.95))
 		}
 
+		// The active line is one flat bright tone, same as every other line
+		// just a different one - not a per-word wipe. LRCLIB only times whole
+		// lines; a word's own moment is an estimate (see timeWords), good
+		// enough to click on but not honest enough to animate a highlight
+		// against, so nothing here claims otherwise.
 		col := scaleAlpha(base, alpha)
 		for r, row := range para.rows {
 			baseline := top + w.lineH*0.74 + float64(r)*w.lineH
-			drawText(clip, face, col, bx, baseline, row)
+			for _, wd := range row.words {
+				drawText(clip, face, col, bx+wd.x, baseline, wd.text)
+			}
 		}
 	}
 }
@@ -619,6 +648,9 @@ func (w *LyricsWindow) hitZone(x, y int) zone {
 	if w.track.URI != "" && math.Hypot(fx-openX, fy-closeY) <= closeR+w.px(4) {
 		return zoneOpenSpotify
 	}
+	if ax, ay, asize := w.coverRect(); fx >= ax && fx <= ax+asize && fy >= ay && fy <= ay+asize {
+		return zoneAmbient
+	}
 	// The slider's grab band reaches past both ends and well above and below
 	// the 3px track, which is far too thin to aim at.
 	if fy > sliderY-w.px(10) && fy < sliderY+w.px(10) &&
@@ -648,8 +680,14 @@ func (w *LyricsWindow) onMouseDown(x, y int) {
 	}
 	z := w.hitZone(x, y)
 
-	if z == zoneBody && w.handleLineClick(x, y, time.Now()) {
-		return // a double-click on a lyric line seeked; nothing to drag
+	if z == zoneBody {
+		if wd, ok := w.wordAt(x, y); ok {
+			w.seekTo(wd.at)
+			return
+		}
+		if w.handleLineClick(x, y, time.Now()) {
+			return // a double-click on a lyric line seeked; nothing to drag
+		}
 	}
 
 	sx, sy := cursorPos()
@@ -660,6 +698,10 @@ func (w *LyricsWindow) onMouseDown(x, y int) {
 		return
 	case zoneOpenSpotify:
 		w.openTrack()
+		return
+	case zoneAmbient:
+		w.ambientOn = !w.ambientOn
+		w.dirty = true
 		return
 	case zoneGripCorner, zoneGripBottom:
 		w.drag = dragResize
@@ -717,6 +759,46 @@ func (w *LyricsWindow) lineAt(y int) int {
 	return -1
 }
 
+// wordAt is the word under a client-coordinate point, or ok=false. Only
+// synced lyrics have anything worth seeking to, same gate as lineAt.
+func (w *LyricsWindow) wordAt(x, y int) (ws wordSpan, ok bool) {
+	if w.doc == nil || !w.doc.Synced || len(w.para) == 0 {
+		return wordSpan{}, false
+	}
+	bx, by, _, bh := w.bodyRect()
+	fx, fy := float64(x), float64(y)
+	if fy < by || fy > by+bh {
+		return wordSpan{}, false
+	}
+
+	for i := range w.para {
+		para := &w.para[i]
+		if para.blank {
+			continue
+		}
+		top := by - w.scroll + para.top
+		if fy < top || fy >= top+para.h {
+			continue
+		}
+		row := int((fy - top) / w.lineH)
+		if row < 0 || row >= len(para.rows) {
+			return wordSpan{}, false
+		}
+		// A generous horizontal pad: words are a thin target, and the pad
+		// matters more than it would collide, since two words on the same
+		// row are rarely closer together than this.
+		pad := w.px(3)
+		rx := fx - bx
+		for _, wd := range para.rows[row].words {
+			if rx >= wd.x-pad && rx <= wd.x+wd.w+pad {
+				return wd, true
+			}
+		}
+		return wordSpan{}, false
+	}
+	return wordSpan{}, false
+}
+
 // handleLineClick tracks clicks on lyric lines and seeks when two land on
 // the same line inside lyrDoubleClickWindow. now is a parameter rather than
 // time.Now() so the pairing logic can be driven by a test clock.
@@ -766,6 +848,10 @@ func (w *LyricsWindow) onMouseMove(x, y int) {
 	}
 	if hot := z == zoneOpenSpotify; hot != w.openHot {
 		w.openHot = hot
+		w.dirty = true
+	}
+	if hot := z == zoneAmbient; hot != w.coverHot {
+		w.coverHot = hot
 		w.dirty = true
 	}
 	if w.drag == dragNone {
@@ -909,7 +995,7 @@ func (w *LyricsWindow) applyCursor() bool {
 		setCursorShape(cursorSizeNWSE)
 	case zoneGripBottom:
 		setCursorShape(cursorSizeNS)
-	case zoneClose, zoneRail, zoneOpacity, zoneOpenSpotify:
+	case zoneClose, zoneRail, zoneOpacity, zoneOpenSpotify, zoneAmbient:
 		setCursorShape(cursorHand)
 	default:
 		setCursorShape(cursorArrow)

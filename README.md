@@ -13,6 +13,8 @@ Bikin rotary knob di keyboard (LEOBOG Hi75C Pro) ngatur **volume Spotify doang**
 | Tarik baris progress di panel lirik | Lompat ke detik itu |
 | Tarik slider di header panel lirik | Atur transparansi panelnya |
 | Klik dua kali baris lirik | Lompat ke detik baris itu |
+| Klik satu kata di baris mana pun | Lompat ke detik kata itu |
+| Klik cover art di panel lirik | Ganti ke mode ambient (backdrop blur dari cover) |
 | Klik ikon panah di header panel lirik | Buka lagu itu di aplikasi/web Spotify |
 | Klik kartunya pakai mouse | Kartunya langsung hilang |
 | **Shift + puter knob** | Lolos ke Windows, jadi master volume biasa (escape hatch) |
@@ -288,6 +290,38 @@ Discoverability-nya nggak dikorbankan: pas kursor nempel di ikonnya, badge sumbe
 
 Terbukti live: diklik pas lagu lagi main, `hitZone` kekonfirmasi resolve ke ikon yang benar lewat log, dan mekanisme `ShellExecuteW`-nya sendiri (nggak berubah dari versi pil) udah dibuktikan sebelumnya buka window Spotify langsung ke halaman lagunya (ditangkep pakai `PrintWindow` biar kebaca walau ketutup app lain).
 
+### Klik satu kata = lompat persis ke situ
+
+Klik dua kali baris masih ada, tapi sekarang ada yang lebih presisi: klik **satu kali** kata mana pun, dan lagu lompat ke detik kata itu — bukan cuma detik baris tempat kata itu berada.
+
+LRCLIB cuma nyimpen timestamp per **baris**, bukan per kata. Jadi detik tiap kata dihitung sendiri di sisi panel: durasi baris (dari timestamp baris itu sampai baris berikutnya) dibagi ke tiap kata proporsional sama panjangnya — kata pendek dapet jatah waktu lebih sedikit, kata panjang lebih banyak. Ini estimasi, bukan data asli, makanya nggak diklaim presisi di UI mana pun — cuma dipakai buat nentuin titik seek pas kata itu diklik, cukup akurat buat itu.
+
+Sempet ada versi yang nge-highlight progresif per kata (efek "wipe" kayak karaoke, kata yang lagi "dinyanyiin" nyala pelan-pelan). Dicabut lagi: karena timing-nya cuma estimasi, efeknya kadang kelihatan nggak pas sama lagu yang beneran diputer — mendingan jujur, satu warna terang buat seluruh baris aktif (kayak dari awal), presisi kliknya tetep ada di belakang layar.
+
+### Mode ambient
+
+Klik cover art di header, dan background kartu berubah dari gradasi flat jadi foto cover-nya sendiri, di-blur lembut plus scrim gelap biar teks tetap kebaca. Klik lagi buat balik. Semua kontrol lain (slider, rail, klik kata, drag, resize) tetep persis sama — cuma background-nya yang beda, bukan mode terpisah dengan mekanisme baru.
+
+Blur-nya bukan box-blur beneran — cover-nya di-downsample dulu ke 6×6 piksel, baru di-upscale balik pakai interpolasi halus. Downsample-lalu-upsample itu sendiri sudah jadi blur (detail hilang duluan pas di-downsample), jadi nggak perlu nulis blur RGB terpisah, tinggal pakai fungsi scaling yang udah ada.
+
+### Glow header yang napas ngikutin ritme lagu
+
+Bloom aksen di belakang cover (yang sebelumnya statis) sekarang berdenyut pelan ngikutin ritme lagu — **bukan BPM asli**. Endpoint tempo Spotify (`/audio-features`) sekarang nolak request dari app kecil kayak ini (dicek langsung: 403 Forbidden), jadi nggak ada BPM yang bisa dibaca sama sekali.
+
+Gantinya, jarak antar-baris lirik ber-timestamp dipakai sebagai proksi ritme — median dari jarak-jarak itu (bukan rata-rata, biar satu jeda instrumental panjang nggak nge-geser angkanya), dijepit ke rentang yang enak dilihat (0,7–2,4 detik per denyut). Lagu cepat punya jarak baris pendek → denyut cepat; balada pelan → denyut pelan. Bukan BPM beneran, tapi jujur ngikutin pace asli lagunya. Kalau lirik-nya nggak ber-timestamp atau kurang dari 3 baris, glow-nya diem aja — nggak ngarang angka.
+
+Denyutnya ngikutin **posisi lagu**, bukan jam sistem — pause lagu, glow-nya ikut berhenti; scrub, glow-nya ikut lompat. Redraw-nya juga di-throttle ke ~30fps (bukan tiap frame), karena efek napas pelan segitu udah mulus di mata tanpa perlu 144fps.
+
+**Ditemukan lewat mengukur, bukan nebak**: nambahin redraw terus-menerus buat efek ini awalnya bikin `render()` panel makan ~10,6ms/frame — jauh dari budget 144fps (6,9ms). Diprofil, ternyata 85%-nya bukan dari fitur baru sama sekali, tapi kode lama (bayangan, gradien card, border ring) yang dirasterisasi ulang dari nol tiap frame padahal bentuknya statis — cuma nggak pernah ketahuan karena panel sebelumnya jarang redraw terus-menerus. Sekarang di-cache persis kayak kartu OSD nyimpen shadow/glow-nya (lihat `internal/osd/lyricscache.go`): dirasterisasi sekali, dipakai ulang tiap frame lewat blit murah. Hasilnya turun ke ~4,4ms/frame.
+
+Satu bug kepampang dari perbaikan ini: mask glow yang di-cache awalnya cuma tau bentuk lingkaran falloff-nya sendiri, nggak tau bentuk rounded-corner kartunya — jadi glow-nya bocor keluar ngelewatin sudut atas-kiri yang membulat, kelihatan kayak kotak nempel di pojok. Diperbaiki dengan nge-clip mask-nya ke bentuk rounded-rect kartu juga, bukan cuma falloff lingkarannya doang.
+
+### Panel lebih responsif pas ganti lagu manual dari Spotify
+
+Daemon-nya baca ulang status Spotify tiap `resync_seconds` (default 10 detik) — cukup buat nge-drift-check volume, tapi kelamaan kalau lo ganti lagu langsung dari app Spotify (bukan lewat knob) sambil panel lirik lagi kebuka: liriknya baru ke-update di siklus baca berikutnya, bisa 6 detik lebih.
+
+Sekarang selagi panel lirik kebuka, daemon maksa baca ulang tiap 2 detik — di luar siklus 10 detik yang biasa, dan cuma selagi ada yang beneran lagi merhatiin panelnya (nggak nambah beban kalau panelnya ketutup). Diuji live: skip lagu langsung lewat Spotify Web API (bypass knob sama sekali, simulasi persis "ganti manual dari app"), panel keupdate dalam ~1,5 detik.
+
 ### Kenapa panelnya nggak ngerebut fokus
 
 `WS_EX_NOACTIVATE`. Panelnya nerima klik, drag, dan resize, tapi nggak pernah ngambil fokus keyboard — jadi lo bisa nggeser panel liriknya di tengah game tanpa game-nya kehilangan input. Hit-testing-nya gratis dari per-pixel alpha: klik di pixel yang transparan (sudut membulatnya, misalnya) diteruskan ke window di bawahnya.
@@ -442,6 +476,10 @@ Yang dicover:
 - **Klik dua kali baris lirik** — dua klik di baris yang sama dalam jendela waktunya nge-seek; dua klik di baris beda, atau kelewat lambat, nggak; klik ketiga nempel di belakang pasangan yang udah jadi nggak nge-seek dua kali; ganti lagu mutusin pasangan klik yang lagi ditunggu; lagu yang durasinya nggak diketahui nggak bisa di-double-click sama sekali
 - **Tombol Open in Spotify** — nggak nongol kalau nggak ada lagu, nggak crash kalau callback-nya belum dipasang (mode preview), dan URI yang dikirim ke callback-nya persis URI lagu yang lagi aktif
 - **Fallback web Spotify** — `spotify:track:ID` jadi `https://open.spotify.com/track/ID` dan sejenisnya, URI ngaco (kosong, ID kosong, skema yang bukan Spotify) ditolak jadi string kosong, dan urutan yang dicoba (app dulu baru web) selalu app duluan
+- **Timing kata** — durasi baris disebar proporsional ke tiap kata, klik satu kata lompat ke detik kata itu (bukan detik baris), jarak antar-baris yang aneh (nol atau kelewat panjang) dijepit ke rentang yang masuk akal, dan wrap teksnya nggak pernah motong satu kata jadi dua biar tetep satu-klik-satu-kata
+- **Glow ritme** — nggak ngarang angka kalau lirik-nya kurang dari 3 baris ber-timestamp, jarak yang dipakai dijepit ke rentang yang enak dilihat, dan denyutnya ngikutin posisi lagu (bukan jam sistem) — pause lagu, denyutnya ikut berhenti
+- **Mode ambient** — toggle klik cover art nyala-mati dengan bener, background-nya ke-cache dan cuma dibangun ulang pas cover atau ukuran panel beneran ganti
+- **Mask glow rounded-corner** — regresi yang sempet lolos: mask yang di-cache harus ke-clip ke bentuk rounded-rect kartu, nggak cuma ke bentuk lingkaran falloff-nya sendiri, biar nggak bocor ngelewatin sudut yang membulat
 - **Config** — BOM dari Notepad ditoleransi, UTF-16 ditolak dengan pesan yang jelas, key yang absen tetep pakai default
 - **Riwayat lagu** — mundur berkali-kali jalan beneran, cabang baru ngebuang riwayat di depannya, dan ada batas maksimal
 - **Warna aksen** — nolak background gelap, jatuh ke hijau Spotify kalau cover-nya monokrom
@@ -564,6 +602,9 @@ Dependency cuma `golang.org/x/image` (rasterizer vektor + rasterisasi font), sis
 | Rail progress ditarik tapi lagunya nggak lompat | Cek log buat baris `seeked`; kalau nggak ada, kemungkinan Spotify nggak punya device aktif |
 | Daemon kayak jalan tapi kartunya nggak pernah muncul | Kemungkinan port 8888 udah dipegang daemon lain. Sekarang ini kecatat sebagai `http listener failed` di log |
 | Judul lagu next sempat salah lalu berubah | Antreannya udah basi (biasanya gara-gara shuffle). Watcher-nya emang sengaja ngebenerin sendiri |
+| Detik kata yang di-klik kerasa kurang pas | Wajar — LRCLIB cuma nyimpen timestamp per baris, detik per kata itu estimasi (proporsional panjang kata), bukan data asli |
+| Glow header nggak napas/diem aja | Lirik lagunya nggak ber-timestamp, atau kurang dari 3 baris — nggak ada yang bisa dijadiin patokan ritme, jadi sengaja diem daripada ngarang angka |
+| Panel lirik telat ngikutin pas ganti lagu manual dari Spotify | Selagi panel kebuka, daemon maksa baca ulang tiap 2 detik; kalau masih lambat, cek koneksi ke API Spotify |
 | Album art nggak nongol | Cover diambil dari `i.scdn.co`; kalau diblokir, kartunya pakai placeholder piringan hitam |
 | Edit config nggak ngefek | Cek baris `config reloaded` di log. Kalau nggak ada, lihat `config_path` di `-status` — daemon mungkin baca file lain dari yang lo edit |
 | Antrean kosong pas dibuka | Spotify belum ngasih lookahead (biasanya di awal, atau lagi radio/autoplay) |

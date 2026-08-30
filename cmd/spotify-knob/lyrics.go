@@ -75,6 +75,15 @@ const openWait = 450 * time.Millisecond
 // a track change and a seek.
 const followFreq = 300 * time.Millisecond
 
+// lyricsPollFreq is how often the panel forces a fresh read from Spotify
+// while it is open, instead of waiting on the controller's own background
+// poll (resync_seconds, 10s by default - tuned for keeping the volume from
+// drifting, not for catching a skip made from Spotify's own app the instant
+// it happens). A skip made anywhere other than the knob would otherwise take
+// up to a full resync interval to show up here; this is what keeps an open
+// panel closer to real time without polling any faster once it is closed.
+const lyricsPollFreq = 2 * time.Second
+
 func newLyricsManager(ctl *controller.Controller, panel lyricsPanel, card noticeCard,
 	prov lyricsSource, log *slog.Logger) *lyricsManager {
 	return &lyricsManager{ctl: ctl, panel: panel, card: card, prov: prov, log: log}
@@ -250,6 +259,7 @@ func (m *lyricsManager) noLyrics(np controller.NowPlaying) {
 func (m *lyricsManager) run(ctx context.Context) {
 	tick := time.NewTicker(followFreq)
 	defer tick.Stop()
+	var lastPoll time.Time
 
 	for {
 		select {
@@ -259,6 +269,13 @@ func (m *lyricsManager) run(ctx context.Context) {
 		}
 		if !m.panel.Visible() {
 			continue
+		}
+
+		if time.Since(lastPoll) >= lyricsPollFreq {
+			lastPoll = time.Now()
+			if err := m.ctl.Sync(ctx); err != nil {
+				m.log.Debug("lyrics: could not refresh the player", "err", err)
+			}
 		}
 
 		np := m.ctl.Current()

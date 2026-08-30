@@ -149,6 +149,7 @@ const (
 	zoneRail
 	zoneOpacity
 	zoneOpenSpotify
+	zoneAmbient
 )
 
 // dragMode is what a held mouse button is currently doing.
@@ -235,6 +236,21 @@ type LyricsWindow struct {
 	// The "Open in Spotify" button.
 	openHot bool
 
+	// Ambient mode: the card's background becomes the blurred cover instead
+	// of the flat gradient. Toggled by clicking the cover itself, which is
+	// why coverHot exists - the same hover language as every other control.
+	ambientOn bool
+	coverHot  bool
+
+	// The header glow's gentle pulse. Zero means there is nothing honest to
+	// derive a rate from (see pulsePeriodFor), and the glow just stays put.
+	pulsePeriod   time.Duration
+	lastPulseTick time.Time
+
+	// Cached rasterisation of the panel's mostly-static chrome. See
+	// lyricscache.go.
+	lc lyricsCache
+
 	// Double-click detection on a lyric line. A click records which
 	// paragraph it landed on; a second click on the *same* paragraph inside
 	// lyrDoubleClickWindow seeks there. lastClickIdx starts at -1 so the very
@@ -260,10 +276,30 @@ type LyricsWindow struct {
 // paragraph is one lyric line after wrapping, with its own vertical extent.
 type paragraph struct {
 	at    time.Duration
-	rows  []string
+	rows  []wordRow
 	top   float64
 	h     float64
 	blank bool
+}
+
+// wordSpan is one word of a lyric line: its estimated moment and how long it
+// takes to sing, plus where it sits within the row it wrapped onto.
+//
+// LRCLIB - like almost every lyrics source - times whole lines, not words.
+// at and dur are interpolated across the line's own window, weighted by each
+// word's length, the way karaoke tools reach for when nothing more precise
+// is available. It is a good enough estimate to click on; it is not a claim
+// of measured precision, which is why nothing in the UI badges it as exact.
+type wordSpan struct {
+	text string
+	at   time.Duration
+	dur  time.Duration
+	x, w float64 // position within the row, row-local
+}
+
+// wordRow is one visual row of a wrapped paragraph.
+type wordRow struct {
+	words []wordSpan
 }
 
 // NewLyrics builds the panel. It does nothing until Run is called.
@@ -531,6 +567,10 @@ func (w *LyricsWindow) apply(ctx context.Context, c lyricsCmd) {
 		// A stale paragraph index from the previous song must never pair up
 		// with a click on the new one.
 		w.lastClickIdx = -1
+		w.pulsePeriod = 0
+		if w.doc != nil && w.doc.Synced {
+			w.pulsePeriod = pulsePeriodFor(w.doc.Lines)
+		}
 		w.dirty = true
 	}
 }
@@ -657,6 +697,15 @@ func (w *LyricsWindow) advance(now time.Time) {
 	if w.track.Duration > 0 {
 		w.dirty = w.dirty || int(pos/time.Second) != int((pos-w.frameDur)/time.Second)
 	}
+
+	// The header glow breathes continuously while something is actually
+	// playing, throttled well under frame rate - a slow wobble like this is
+	// no less smooth at 30fps than at 144, and there is no reason to pay for
+	// the difference on every one of the other frames.
+	if w.pulsePeriod > 0 && w.track.Playing && now.Sub(w.lastPulseTick) > 33*time.Millisecond {
+		w.lastPulseTick = now
+		w.dirty = true
+	}
 }
 
 // anchorFor is the scroll offset that puts line i at the reading anchor.
@@ -733,16 +782,32 @@ func (w *LyricsWindow) layout() {
 	face := w.fonts.face(semibold, w.px(lyrLineSize))
 	w.lineH = w.px(lyrLineSize * lyrLineLead)
 	gap := w.px(lyrLineGap)
+	spaceW := measure(face, " ")
+
+	lines := linesOf(w.doc)
+	synced := w.doc != nil && w.doc.Synced
 
 	top := 0.0
-	for _, ln := range linesOf(w.doc) {
+	for i, ln := range lines {
 		p := paragraph{at: ln.At, top: top, blank: strings.TrimSpace(ln.Text) == ""}
 		if p.blank {
 			// A rest between verses. It still gets a slot so the highlight can
 			// sit on it, just a short one.
 			p.h = w.lineH * 0.8
 		} else {
-			p.rows = wrapText(face, ln.Text, bodyW)
+			fields := strings.Fields(ln.Text)
+			var words []wordSpan
+			if synced {
+				words = timeWords(fields, ln.At, w.estimateLineDur(lines, i))
+			} else {
+				// Nothing to interpolate from - plain text lyrics render the
+				// same as before, just word-by-word instead of one string.
+				words = make([]wordSpan, len(fields))
+				for j, f := range fields {
+					words[j] = wordSpan{text: f}
+				}
+			}
+			p.rows = wrapWords(face, words, bodyW, spaceW)
 			p.h = float64(len(p.rows)) * w.lineH
 		}
 		w.para = append(w.para, p)
@@ -751,63 +816,120 @@ func (w *LyricsWindow) layout() {
 	w.contentH = top
 }
 
+// estimateLineDur is the window a line's words are spread across. The line
+// after it marks where that window ends; a blank rest line counts too, since
+// that is genuinely where the singing stops. For the last line, whatever is
+// left of the track stands in.
+//
+// The window is clamped both ways: never so short that words packed together
+// would blur into one wipe, and never so long that a short line's highlight
+// visibly stalls across a multi-second instrumental gap before the next one.
+func (w *LyricsWindow) estimateLineDur(lines []LyricLine, i int) time.Duration {
+	const (
+		minWordDur  = 150 * time.Millisecond
+		maxLineSpan = 6 * time.Second
+	)
+	cur := lines[i].At
+	next := cur + maxLineSpan
+	switch {
+	case i+1 < len(lines):
+		next = lines[i+1].At
+	case w.track.Duration > cur:
+		next = w.track.Duration
+	}
+
+	d := next - cur
+	wc := len(strings.Fields(lines[i].Text))
+	if wc == 0 {
+		wc = 1
+	}
+	if min := time.Duration(wc) * minWordDur; d < min {
+		d = min
+	}
+	if d > maxLineSpan {
+		d = maxLineSpan
+	}
+	return d
+}
+
+// timeWords spreads a line's window across its words, weighted by rune
+// count so a short word does not take as long to "sing" as a long one. The
+// +1 per word roughly stands in for the breath after it.
+func timeWords(words []string, at, dur time.Duration) []wordSpan {
+	spans := make([]wordSpan, len(words))
+	if len(words) == 0 {
+		return spans
+	}
+	if dur <= 0 {
+		for i, wd := range words {
+			spans[i] = wordSpan{text: wd, at: at}
+		}
+		return spans
+	}
+	weights := make([]float64, len(words))
+	total := 0.0
+	for i, wd := range words {
+		weights[i] = float64(len([]rune(wd))) + 1
+		total += weights[i]
+	}
+	cum := 0.0
+	for i, wd := range words {
+		start := at + time.Duration(cum/total*float64(dur))
+		cum += weights[i]
+		end := at + time.Duration(cum/total*float64(dur))
+		spans[i] = wordSpan{text: wd, at: start, dur: end - start}
+	}
+	return spans
+}
+
+// wrapWords packs pre-timed words into rows no wider than maxW, greedily,
+// the same way the plain-text wrapper this replaces did - the difference is
+// that every word keeps its own x position and timing instead of being
+// flattened into one string per row, which is what makes both the karaoke
+// wipe and click-to-seek possible.
+//
+// A single word wider than maxW is placed on its own row rather than being
+// broken mid-word: breaking it would leave two fragments of what has to stay
+// one clickable, one seekable word.
+func wrapWords(face font.Face, words []wordSpan, maxW, spaceW float64) []wordRow {
+	if len(words) == 0 {
+		return nil
+	}
+	if face == nil || maxW <= 0 {
+		return []wordRow{{words: words}}
+	}
+
+	var rows []wordRow
+	var row []wordSpan
+	x := 0.0
+	flush := func() {
+		if len(row) > 0 {
+			rows = append(rows, wordRow{words: row})
+			row = nil
+			x = 0
+		}
+	}
+	for _, ws := range words {
+		ww := measure(face, ws.text)
+		if len(row) > 0 && x+ww > maxW {
+			flush()
+		}
+		ws.x, ws.w = x, ww
+		row = append(row, ws)
+		x += ww + spaceW
+	}
+	flush()
+	if len(rows) == 0 {
+		rows = []wordRow{{words: words}}
+	}
+	return rows
+}
+
 func linesOf(d *LyricDoc) []LyricLine {
 	if d == nil {
 		return nil
 	}
 	return d.Lines
-}
-
-// wrapText breaks s into rows no wider than maxW, splitting inside a word
-// only when a single word cannot fit on its own.
-func wrapText(face font.Face, s string, maxW float64) []string {
-	s = strings.TrimSpace(s)
-	if s == "" || face == nil || maxW <= 0 {
-		return []string{s}
-	}
-	if measure(face, s) <= maxW {
-		return []string{s}
-	}
-
-	var rows []string
-	line := ""
-	flush := func() {
-		if line != "" {
-			rows = append(rows, line)
-			line = ""
-		}
-	}
-	for _, word := range strings.Fields(s) {
-		candidate := word
-		if line != "" {
-			candidate = line + " " + word
-		}
-		if measure(face, candidate) <= maxW {
-			line = candidate
-			continue
-		}
-		flush()
-		if measure(face, word) <= maxW {
-			line = word
-			continue
-		}
-		// A single word wider than the panel: break it by runes.
-		runes := []rune(word)
-		cur := ""
-		for _, r := range runes {
-			if measure(face, cur+string(r)) > maxW && cur != "" {
-				rows = append(rows, cur)
-				cur = ""
-			}
-			cur += string(r)
-		}
-		line = cur
-	}
-	flush()
-	if len(rows) == 0 {
-		rows = []string{s}
-	}
-	return rows
 }
 
 // clipTo returns the sub-image a drawer may write into, so a scrolling line
