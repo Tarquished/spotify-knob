@@ -12,6 +12,8 @@ Bikin rotary knob di keyboard (LEOBOG Hi75C Pro) ngatur **volume Spotify doang**
 | **Ctrl + pencet knob** | Buka/tutup panel lirik yang ngikutin detik lagu |
 | Tarik baris progress di panel lirik | Lompat ke detik itu |
 | Tarik slider di header panel lirik | Atur transparansi panelnya |
+| Klik dua kali baris lirik | Lompat ke detik baris itu |
+| Klik "Open in Spotify" di panel lirik | Buka lagu itu di aplikasi/web Spotify |
 | Klik kartunya pakai mouse | Kartunya langsung hilang |
 | **Shift + puter knob** | Lolos ke Windows, jadi master volume biasa (escape hatch) |
 
@@ -266,6 +268,20 @@ Dulu transparansi cuma angka di config yang harus diedit terus di-reload. Sekara
 
 Dua kontrol ini sama-sama pakai satu disiplin: `headerMetrics` dan `footerMetrics` menghitung posisi kontrolnya sekali, dan penggambar maupun hit-test-nya baca dari situ. Jadi yang kelihatan dan yang bisa diklik nggak akan pernah beda — kelas bug yang gampang banget kejadian kalau dua-duanya menghitung sendiri-sendiri.
 
+### Klik dua kali baris lirik = lompat ke situ
+
+Sama kayak tarik rail, cuma lebih presisi: klik dua kali baris mana pun dan lagu lompat ke detik baris itu persis. Klik pertama diinget bareng baris mana yang kena; klik kedua di baris **yang sama** dalam 400ms dihitung pasangan dan langsung seek — klik ketiga yang nempel di belakangnya nggak ngulang seek-nya lagi (pasangannya udah "dipakai").
+
+Klik di baris yang beda dari klik sebelumnya, atau klik keduanya kelewat lambat, dianggap dua klik tunggal biasa — sama sekali nggak ganggu drag-scroll yang udah ada. Baris yang liriknya nggak ber-timestamp (`docState` bukan `docReady` yang synced) nggak bisa di-double-click sama sekali, karena nggak ada detik yang bisa dituju. Lagu yang durasinya nggak diketahui juga nggak bisa — gerbang yang sama yang nyembunyiin rail progress.
+
+### Tombol "Open in Spotify"
+
+Ada di header, di bawah nama artis. Ditekan, daemon nyoba buka `spotify:track:...` URI-nya lewat `ShellExecuteW` — persis kayak lo dobel klik shortcut ke situ: kalau app Spotify-nya kepasang, dia yang kebuka dan langsung nunjukin lagunya; kalau nggak, fallback ke `https://open.spotify.com/track/...` di browser default.
+
+Tombolnya cuma muncul kalau ada lagu yang lagi diketahui (ada URI-nya) — bukan tombol yang keliatan tapi nggak ngapa-ngapain kalau diklik. Sempet ada satu bug pas awal: labelnya dikasih panah "↗" di belakang teksnya, dan itu nggak kerender di font yang dipakai, jadinya kotak kosong. Diganti teks polos "Open in Spotify" tanpa simbol apa pun — nggak ada risiko font nggak support karakter itu.
+
+Terbukti live: diklik pas lagu "Matilda" lagi main, dan window Spotify-nya (ditangkep pakai `PrintWindow` biar kebaca walau ketutup app lain) langsung nunjukin sidebar "Matilda — Harry Styles" kebuka dengan track-nya di-highlight di daftar.
+
 ### Kenapa panelnya nggak ngerebut fokus
 
 `WS_EX_NOACTIVATE`. Panelnya nerima klik, drag, dan resize, tapi nggak pernah ngambil fokus keyboard — jadi lo bisa nggeser panel liriknya di tengah game tanpa game-nya kehilangan input. Hit-testing-nya gratis dari per-pixel alpha: klik di pixel yang transparan (sudut membulatnya, misalnya) diteruskan ke window di bawahnya.
@@ -417,6 +433,9 @@ Yang dicover:
 - **Panel nggak buka sendiri** — hasil lookup yang mendarat setelah panelnya ditutup dibuang, ganti lagu di balik panel tertutup nggak munculin apa-apa, dan pencetan kedua selagi lookup jalan bikin batal bukan buka dua kali
 - **Seek** — pemetaan posisi kursor ke detik lagu termasuk yang keluar ujung rail, highlight ngikutin handle selagi ditarik, bacaan basi dari polling nggak bisa nimpa seek yang baru, penahannya nggak kebawa ke lagu berikutnya, dan seek dilaporin tepat sekali
 - **Slider transparansi** — pemetaannya bolak-balik konsisten (nilai → posisi handle → nilai yang sama), nilai di luar batas dijepit, dan opacity yang belum diset nggak kebaca sebagai "tembus pandang"
+- **Klik dua kali baris lirik** — dua klik di baris yang sama dalam jendela waktunya nge-seek; dua klik di baris beda, atau kelewat lambat, nggak; klik ketiga nempel di belakang pasangan yang udah jadi nggak nge-seek dua kali; ganti lagu mutusin pasangan klik yang lagi ditunggu; lagu yang durasinya nggak diketahui nggak bisa di-double-click sama sekali
+- **Tombol Open in Spotify** — nggak nongol kalau nggak ada lagu, nggak crash kalau callback-nya belum dipasang (mode preview), dan URI yang dikirim ke callback-nya persis URI lagu yang lagi aktif
+- **Fallback web Spotify** — `spotify:track:ID` jadi `https://open.spotify.com/track/ID` dan sejenisnya, URI ngaco (kosong, ID kosong, skema yang bukan Spotify) ditolak jadi string kosong, dan urutan yang dicoba (app dulu baru web) selalu app duluan
 - **Config** — BOM dari Notepad ditoleransi, UTF-16 ditolak dengan pesan yang jelas, key yang absen tetep pakai default
 - **Riwayat lagu** — mundur berkali-kali jalan beneran, cabang baru ngebuang riwayat di depannya, dan ada batas maksimal
 - **Warna aksen** — nolak background gelap, jatuh ke hijau Spotify kalau cover-nya monokrom
@@ -506,6 +525,7 @@ internal/spotify                client Web API, error yang bertipe
 internal/controller             state volume, debounce, resync
 internal/hotkey                 low-level keyboard hook Windows
 internal/lyrics                 lookup LRCLIB, parser LRC, cache dua lapis
+internal/openurl                buka spotify:/https: URI lewat ShellExecuteW
 internal/osd                    kartu di layar + panel lirik (layered window, renderer sendiri)
 internal/server                 HTTP loopback (127.0.0.1 doang)
 ahk/spotify-knob.ahk            fallback opsional, cuma perlu kalau hotkeys:false

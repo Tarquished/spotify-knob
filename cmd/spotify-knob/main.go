@@ -193,6 +193,7 @@ func run(cfgPath string, verbose, doAuth, noHotkey, statusOnly bool, pasteCode s
 	store := newPanelStore(dir, log)
 	panelOpts := lyricsOptions(cfg, store)
 	panelOpts.OnSeek = func(pos time.Duration) { ctl.Seek(context.WithoutCancel(ctx), pos) }
+	panelOpts.OnOpenSpotify = func(uri string) { openInSpotify(uri, log) }
 	panel := osd.NewLyrics(panelOpts, log)
 	lyr := newLyricsManager(ctl, panel, card,
 		lyrics.New(filepath.Join(dir, "lyrics"), log), log)
@@ -248,6 +249,7 @@ func run(cfgPath string, verbose, doAuth, noHotkey, statusOnly bool, pasteCode s
 			nextPanel.X, nextPanel.Y, nextPanel.W, nextPanel.H = 0, 0, 0, 0
 			nextPanel.Opacity = next.Lyrics.Opacity
 			nextPanel.OnSeek = panelOpts.OnSeek
+			nextPanel.OnOpenSpotify = panelOpts.OnOpenSpotify
 			panel.Reconfigure(nextPanel)
 			gestures.Store(gestureFrom(next))
 		})
@@ -311,6 +313,7 @@ func runLyricsPreview(cfgPath, want string, verbose bool) error {
 
 	opts := lyricsOptions(cfg, newPanelStore(dir, log))
 	opts.Enabled = true
+	opts.OnOpenSpotify = func(uri string) { openInSpotify(uri, log) }
 	panel := osd.NewLyrics(opts, log)
 
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)

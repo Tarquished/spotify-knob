@@ -84,6 +84,11 @@ type LyricsOptions struct {
 	// OnOpacity is called when the user lets go of the opacity slider, so the
 	// caller can remember how see-through they wanted the panel.
 	OnOpacity func(v float64)
+
+	// OnOpenSpotify is called with the current track's URI when the user
+	// presses the "Open in Spotify" button. It may block: the panel calls it
+	// on its own goroutine.
+	OnOpenSpotify func(uri string)
 }
 
 // Lyrics panel geometry, in logical pixels before the display scale.
@@ -112,6 +117,17 @@ const (
 	// the slider will not go there and neither will the config.
 	lyrOpacityMin = 0.40
 
+	// The "Open in Spotify" button sits under the artist name, on the left
+	// where the opacity slider's row on the right leaves room.
+	lyrOpenBtnH    = 20
+	lyrOpenBtnPadX = 10
+
+	// lyrDoubleClickWindow is how close two clicks on the same lyric line
+	// have to land to count as a double-click and seek there. Windows' own
+	// GetDoubleClickTime defaults to 500ms; this stays a little under it so
+	// the panel never feels slower to react than the desktop around it.
+	lyrDoubleClickWindow = 400 * time.Millisecond
+
 	lyrLineSize    = 19
 	lyrLineGap     = 11   // between wrapped paragraphs
 	lyrLineLead    = 1.28 // multiple of the font size, within a paragraph
@@ -137,6 +153,7 @@ const (
 	zoneGripBottom
 	zoneRail
 	zoneOpacity
+	zoneOpenSpotify
 )
 
 // dragMode is what a held mouse button is currently doing.
@@ -220,6 +237,16 @@ type LyricsWindow struct {
 	sliding    bool
 	sliderShow time.Time
 
+	// The "Open in Spotify" button.
+	openHot bool
+
+	// Double-click detection on a lyric line. A click records which
+	// paragraph it landed on; a second click on the *same* paragraph inside
+	// lyrDoubleClickWindow seeks there. lastClickIdx starts at -1 so the very
+	// first click in a session can never accidentally pair with anything.
+	lastClickAt  time.Time
+	lastClickIdx int
+
 	// Input state.
 	drag        dragMode
 	dragX       int
@@ -247,11 +274,12 @@ type paragraph struct {
 // NewLyrics builds the panel. It does nothing until Run is called.
 func NewLyrics(opts LyricsOptions, log *slog.Logger) *LyricsWindow {
 	return &LyricsWindow{
-		log:    log,
-		opts:   opts,
-		events: make(chan lyricsCmd, 32),
-		state:  docIdle,
-		active: -1,
+		log:          log,
+		opts:         opts,
+		events:       make(chan lyricsCmd, 32),
+		state:        docIdle,
+		active:       -1,
+		lastClickIdx: -1,
 	}
 }
 
@@ -505,6 +533,9 @@ func (w *LyricsWindow) apply(ctx context.Context, c lyricsCmd) {
 		w.wrapKey = ""
 		w.scroll, w.scrollTo, w.active = 0, 0, -1
 		w.manualTil = time.Time{}
+		// A stale paragraph index from the previous song must never pair up
+		// with a click on the new one.
+		w.lastClickIdx = -1
 		w.dirty = true
 	}
 }

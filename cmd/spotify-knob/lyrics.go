@@ -7,11 +7,13 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
 	"spotify-knob/internal/controller"
 	"spotify-knob/internal/lyrics"
+	"spotify-knob/internal/openurl"
 	"spotify-knob/internal/osd"
 )
 
@@ -397,4 +399,56 @@ func (s *panelStore) write() {
 	if err := os.WriteFile(s.path, b, 0o644); err != nil {
 		s.log.Debug("could not remember the lyrics panel state", "err", err)
 	}
+}
+
+// ---------------------------------------------------------------------------
+// Open in Spotify
+
+// spotifyLaunchTargets orders what to try for the "Open in Spotify" button.
+// The app itself goes first, since it can take you straight to the track
+// inside whatever context you already had open; the web player is the
+// fallback for a machine where the desktop app is not installed or has not
+// registered the spotify: protocol.
+func spotifyLaunchTargets(uri string) []string {
+	targets := []string{uri}
+	if web := spotifyWebFallback(uri); web != "" {
+		targets = append(targets, web)
+	}
+	return targets
+}
+
+// spotifyWebFallback turns "spotify:track:ID" into the equivalent
+// open.spotify.com page, or "" if uri is not that shape.
+func spotifyWebFallback(uri string) string {
+	const prefix = "spotify:"
+	if !strings.HasPrefix(uri, prefix) {
+		return ""
+	}
+	kind, id, ok := strings.Cut(strings.TrimPrefix(uri, prefix), ":")
+	if !ok || kind == "" || id == "" {
+		return ""
+	}
+	switch kind {
+	case "track", "album", "artist", "playlist", "show", "episode":
+		return "https://open.spotify.com/" + kind + "/" + id
+	default:
+		return ""
+	}
+}
+
+// openInSpotify tries each launch target in order and stops at the first
+// that succeeds, logging the rest as they fail. It is meant to run on its
+// own goroutine - a broken browser association must not stall the panel.
+func openInSpotify(uri string, log *slog.Logger) {
+	if uri == "" {
+		return
+	}
+	for _, target := range spotifyLaunchTargets(uri) {
+		if err := openurl.Open(target); err == nil {
+			return
+		} else {
+			log.Debug("could not open lyrics track target", "target", target, "err", err)
+		}
+	}
+	log.Warn("could not open track in Spotify", "uri", uri)
 }

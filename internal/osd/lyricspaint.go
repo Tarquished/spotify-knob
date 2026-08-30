@@ -138,11 +138,79 @@ func (w *LyricsWindow) drawHeader(cx, cy, cw float64, accent color.RGBA) {
 
 	w.drawClose(closeX, closeY, closeR)
 	w.drawOpacitySlider(sliderX, sliderY, sliderW, accent)
+	w.drawOpenButton(accent)
 
 	div := cy + w.px(lyrHeaderH) - w.px(1)
 	p.begin(cx+inset, div, cw-2*inset, 1)
 	p.roundRect(cx+inset, div, cw-2*inset, 1, 0.5)
 	p.flat(colLyrDivide)
+}
+
+// openButtonRect places the "Open in Spotify" button, and is the single
+// source of truth both drawOpenButton and hitZone read from - the button you
+// see and the button you can click can never end up in different places.
+//
+// It hugs its own label rather than filling a fixed box, so the button never
+// overlaps the opacity slider's column on the right even when the panel is
+// as narrow as lyrMinW allows: everything past what fits between the artist
+// text and the slider is dropped through truncate, same as the title above it.
+func (w *LyricsWindow) openButtonRect() (x, y, ww, hh float64, label string, show bool) {
+	if w.track.URI == "" {
+		return 0, 0, 0, 0, "", false
+	}
+	m := w.px(lyrMargin)
+	cx := m
+	inset := w.px(18)
+	thumb := w.px(lyrThumb)
+	textX := cx + inset + thumb + w.px(14)
+
+	_, _, _, sliderX, _, _ := w.headerMetrics()
+	maxW := sliderX - w.px(10) - textX
+	pad := w.px(lyrOpenBtnPadX)
+	if maxW < pad*2+w.px(20) {
+		return 0, 0, 0, 0, "", false // too narrow to bother at extreme sizes
+	}
+
+	face := w.fonts.face(semibold, w.px(10.5))
+	// Plain text, deliberately: an arrow glyph (U+2197 etc.) rendered as a
+	// tofu box the first time this was tried, because the opentype face here
+	// is not guaranteed to carry every Unicode arrow. Plain ASCII has no such
+	// failure mode.
+	label = truncate(face, "Open in Spotify", maxW-pad*2)
+	hh = w.px(lyrOpenBtnH)
+	ww = measure(face, label) + pad*2
+	y = m + w.px(58)
+	return textX, y, ww, hh, label, true
+}
+
+// drawOpenButton is a small pill button under the artist name. Like the
+// opacity slider, it is drawn at the panel's own opacity, so it dims along
+// with everything else rather than punching through it.
+func (w *LyricsWindow) drawOpenButton(accent color.RGBA) {
+	x, y, ww, hh, label, show := w.openButtonRect()
+	if !show {
+		return
+	}
+	p := w.paint
+	rad := hh / 2
+
+	bg := scaleAlpha(premul(accent), 0.16)
+	border := scaleAlpha(premul(accent), 0.32)
+	if w.openHot {
+		bg = scaleAlpha(premul(accent), 0.30)
+		border = scaleAlpha(premul(accent), 0.55)
+	}
+	p.begin(x, y, ww, hh)
+	p.roundRect(x, y, ww, hh, rad)
+	p.flat(bg)
+	p.begin(x, y, ww, hh)
+	p.roundRect(x, y, ww, hh, rad)
+	p.roundRectRev(x+1, y+1, ww-2, hh-2, rad-1)
+	p.flat(border)
+
+	face := w.fonts.face(semibold, w.px(10.5))
+	tw := measure(face, label)
+	drawText(p.dst, face, colText, x+(ww-tw)/2, y+hh*0.7, label)
 }
 
 // drawOpacitySlider is the transparency control: a half-filled disc for a
@@ -545,6 +613,10 @@ func (w *LyricsWindow) hitZone(x, y int) zone {
 		fx > sliderX-w.px(12) && fx < sliderX+sliderW+w.px(8) {
 		return zoneOpacity
 	}
+	if bx, by, bw, bh, _, show := w.openButtonRect(); show &&
+		fx >= bx && fx <= bx+bw && fy >= by && fy <= by+bh {
+		return zoneOpenSpotify
+	}
 
 	// The rail is a thin thing to hit, so the grab band is much taller than
 	// the rail is drawn, and reaches a little past both ends.
@@ -567,11 +639,19 @@ func (w *LyricsWindow) onMouseDown(x, y int) {
 		return
 	}
 	z := w.hitZone(x, y)
+
+	if z == zoneBody && w.handleLineClick(x, y, time.Now()) {
+		return // a double-click on a lyric line seeked; nothing to drag
+	}
+
 	sx, sy := cursorPos()
 
 	switch z {
 	case zoneClose:
 		w.close()
+		return
+	case zoneOpenSpotify:
+		w.openTrack()
 		return
 	case zoneGripCorner, zoneGripBottom:
 		w.drag = dragResize
@@ -597,6 +677,68 @@ func (w *LyricsWindow) onMouseDown(x, y int) {
 	captureMouse(w.win.hwnd)
 }
 
+// openTrack fires the "Open in Spotify" callback. It is a no-op, not a
+// crash, when there is nothing playing or the caller never wired the
+// callback up (the standalone lyrics preview does not touch Spotify at all).
+func (w *LyricsWindow) openTrack() {
+	if w.track.URI == "" || w.opts.OnOpenSpotify == nil {
+		return
+	}
+	uri := w.track.URI
+	go w.opts.OnOpenSpotify(uri)
+}
+
+// lineAt is the paragraph under a client-coordinate y, or -1 for none. Only
+// synced lyrics have a paragraph worth seeking to, so an unsynced or absent
+// doc always misses.
+func (w *LyricsWindow) lineAt(y int) int {
+	if w.doc == nil || !w.doc.Synced || len(w.para) == 0 {
+		return -1
+	}
+	_, by, _, bh := w.bodyRect()
+	fy := float64(y)
+	if fy < by || fy > by+bh {
+		return -1
+	}
+	for i := range w.para {
+		top := by - w.scroll + w.para[i].top
+		if fy >= top && fy < top+w.para[i].h {
+			return i
+		}
+	}
+	return -1
+}
+
+// handleLineClick tracks clicks on lyric lines and seeks when two land on
+// the same line inside lyrDoubleClickWindow. now is a parameter rather than
+// time.Now() so the pairing logic can be driven by a test clock.
+//
+// A track of unknown length has no rail to seek with either, so the same
+// gate applies here: double-click seeking only exists where there is
+// something to seek within.
+func (w *LyricsWindow) handleLineClick(x, y int, now time.Time) bool {
+	if w.track.Duration <= 0 {
+		return false
+	}
+	idx := w.lineAt(y)
+
+	double := idx >= 0 && idx == w.lastClickIdx && now.Sub(w.lastClickAt) <= lyrDoubleClickWindow
+	if !double {
+		w.lastClickAt, w.lastClickIdx = now, idx
+		return false
+	}
+	// Consumed: a third click right behind a completed pair starts fresh
+	// rather than re-triggering, the same way a real double-click does not
+	// chain into a seek on every subsequent click.
+	w.lastClickAt, w.lastClickIdx = time.Time{}, -1
+
+	if w.doc == nil || idx >= len(w.doc.Lines) {
+		return false
+	}
+	w.seekTo(w.doc.Lines[idx].At)
+	return true
+}
+
 func (w *LyricsWindow) onMouseMove(x, y int) {
 	if !w.win.visible {
 		return
@@ -612,6 +754,10 @@ func (w *LyricsWindow) onMouseMove(x, y int) {
 	}
 	if hot := z == zoneOpacity; hot != w.sliderHot {
 		w.sliderHot = hot
+		w.dirty = true
+	}
+	if hot := z == zoneOpenSpotify; hot != w.openHot {
+		w.openHot = hot
 		w.dirty = true
 	}
 	if w.drag == dragNone {
@@ -717,6 +863,13 @@ func (w *LyricsWindow) commitSeek() {
 	}
 	pos := w.scrubPos
 	w.scrubbing = false
+	w.seekTo(pos)
+}
+
+// seekTo adopts pos as the playhead locally and reports it upstream. Both
+// letting go of the rail's handle and double-clicking a lyric line land
+// here, so a seek behaves identically no matter which one triggered it.
+func (w *LyricsWindow) seekTo(pos time.Duration) {
 	w.track.Position = pos
 	w.track.PositionAt = time.Now()
 	w.seekHold = time.Now().Add(seekHoldFor)
@@ -748,7 +901,7 @@ func (w *LyricsWindow) applyCursor() bool {
 		setCursorShape(cursorSizeNWSE)
 	case zoneGripBottom:
 		setCursorShape(cursorSizeNS)
-	case zoneClose, zoneRail, zoneOpacity:
+	case zoneClose, zoneRail, zoneOpacity, zoneOpenSpotify:
 		setCursorShape(cursorHand)
 	default:
 		setCursorShape(cursorArrow)

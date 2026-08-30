@@ -10,11 +10,13 @@ import (
 // window: none of what is tested here paints anything.
 func newTestPanel() *LyricsWindow {
 	return &LyricsWindow{
-		log:    testLogger(),
-		events: make(chan lyricsCmd, 8),
-		art:    newArtCache(46, 46),
-		scale:  1,
-		active: -1,
+		log:          testLogger(),
+		events:       make(chan lyricsCmd, 8),
+		art:          newArtCache(46, 46),
+		fonts:        newFontSet(),
+		scale:        1,
+		active:       -1,
+		lastClickIdx: -1,
 	}
 }
 
