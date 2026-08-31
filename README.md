@@ -322,6 +322,30 @@ Daemon-nya baca ulang status Spotify tiap `resync_seconds` (default 10 detik) �
 
 Sekarang selagi panel lirik kebuka, daemon maksa baca ulang tiap 2 detik — di luar siklus 10 detik yang biasa, dan cuma selagi ada yang beneran lagi merhatiin panelnya (nggak nambah beban kalau panelnya ketutup). Diuji live: skip lagu langsung lewat Spotify Web API (bypass knob sama sekali, simulasi persis "ganti manual dari app"), panel keupdate dalam ~1,5 detik.
 
+### Panel nggak pernah "pergi"
+
+Panel lirik ditutup pas lagi kebuka? Bukanya lagi nanti nggak nge-scroll dari atas buat ngejar lagu — dia langsung nongol persis di baris yang lagi jalan, terus konten liriknya fade-in singkat (~200ms) di posisi itu.
+
+Sebabnya: selagi panel ketutup, dia berhenti ngikutin posisi lagu sama sekali (nggak ada gunanya nge-update sesuatu yang nggak kelihatan). Tanpa perbaikan ini, bukanya bakal nunjukin baris terakhir sebelum ditutup dulu, baru keliatan nge-scroll ngejar ke posisi yang benar — kesannya kayak baru "bangun" dan ketinggalan. Sekarang posisi discroll dihitung ulang tepat sebelum ditampilkan (bukan lewat animasi easing yang biasa dipakai pas lagi kebuka), jadi kesannya panel diem-diem ngikutin terus dari tadi, bukan baru nyusul.
+
+### Baris lama "didesak", bukan diganti mendadak
+
+Pas baris aktif pindah ke baris berikutnya, baris yang baru aja berhenti aktif nggak langsung ganti warna di tempat — dia gerak naik dikit (~6px) sambil warnanya meluntur ke warna baris biasa, kelar dalam 320ms. Bukan efek permanen: begitu transisinya selesai, baris itu balik ke posisi normalnya, cuma warnanya yang beda dari sebelumnya.
+
+Efeknya halus banget, sengaja — ini bukan animasi "wipe" seperti karaoke (yang udah dicabut dari fitur klik-kata di atas), cuma nudge kecil biar lirik terasa mengalir maju, bukan baris yang tiba-tiba "loncat" warna.
+
+### Warna aksen ikut jalan bareng lagu
+
+Biasanya warna aksen (glow header, bar baris aktif, rail progress) diambil sekali dari cover art terus diem sepanjang lagu. Sekarang, kalau durasi lagunya diketahui, warna itu perlahan "menjelajah" beberapa titik warna yang diambil dari cover art-nya sendiri (disapu dari kiri ke kanan), digeser sesuai posisi putar lagu — bukan jam sistem, jadi scrub ke suatu titik atau replay bagian yang sama selalu ngasih warna yang persis sama, bukan warna acak yang beda tiap kali.
+
+Lagu yang durasinya nggak diketahui, atau cover art yang cuma ngasih satu warna yang bisa dipakai, tetap pakai warna aksen statis seperti biasa — nggak ada yang berubah buat kasus itu.
+
+### Latar belakang "bernapas" pas instrumental panjang
+
+Pas playhead ada di bagian yang nggak ada liriknya selama 8 detik atau lebih — intro sebelum baris pertama, outro setelah baris terakhir (kalau durasi lagu diketahui), atau jeda panjang antar-baris — latar belakang kartu dapet wash warna lembut dari warna aksen yang lagi aktif, dua "gumpalan" cahaya lembut yang mengorbit pelan banget (siklus penuh sekitar 2 menit). Bukan lava-lamp yang ramai, cuma variasi kecil di latar yang bikin panel kerasa "hidup" pas nggak ada kata buat ditampilin, bukan macet.
+
+Wash-nya fade in/out sendiri (nggak langsung nyala/mati), dan digambar lewat jalur clip rounded-rect yang sama kayak perbaikan bocor sudut glow header di atas — jadi nggak ada risiko keliatan bocor kotak di pojok.
+
 ### Kenapa panelnya nggak ngerebut fokus
 
 `WS_EX_NOACTIVATE`. Panelnya nerima klik, drag, dan resize, tapi nggak pernah ngambil fokus keyboard — jadi lo bisa nggeser panel liriknya di tengah game tanpa game-nya kehilangan input. Hit-testing-nya gratis dari per-pixel alpha: klik di pixel yang transparan (sudut membulatnya, misalnya) diteruskan ke window di bawahnya.
@@ -480,6 +504,11 @@ Yang dicover:
 - **Glow ritme** — nggak ngarang angka kalau lirik-nya kurang dari 3 baris ber-timestamp, jarak yang dipakai dijepit ke rentang yang enak dilihat, dan denyutnya ngikutin posisi lagu (bukan jam sistem) — pause lagu, denyutnya ikut berhenti
 - **Mode ambient** — toggle klik cover art nyala-mati dengan bener, background-nya ke-cache dan cuma dibangun ulang pas cover atau ukuran panel beneran ganti
 - **Mask glow rounded-corner** — regresi yang sempet lolos: mask yang di-cache harus ke-clip ke bentuk rounded-rect kartu, nggak cuma ke bentuk lingkaran falloff-nya sendiri, biar nggak bocor ngelewatin sudut yang membulat
+- **Bukanya nggak "pergi"** — scroll dan baris aktif langsung ke-snap ke posisi yang benar begitu panel dibuka (bukan lewat animasi ngejar dari posisi lama), dan baris yang aktif pas panel ditutup nggak nyangkut jadi baris yang "didesak" begitu dibuka lagi
+- **Baris "didesak"** — advance() nyatet baris yang baru aja berhenti aktif buat animasinya, tapi cuma kalau ada baris beneran yang aktif sebelumnya, dan repaint-nya berhenti diminta begitu animasinya kelar
+- **Jejak warna aksen** — interpolasi antar-titik warna cover art konsisten di kedua ujung dan di tengah, jatuh balik ke warna aksen statis kalau cover-nya cuma ngasih satu warna dipakai atau durasi lagunya nggak diketahui, dan warnanya ngikutin posisi lagu bukan jam sistem
+- **Sapuan warna cover art** — titik-titik warnanya beneran disapu kiri ke kanan (cover separuh merah separuh biru ngasih balik titik pertama merah, titik terakhir biru), dan cover selebar nol nggak bikin crash
+- **Wash instrumental** — cuma nggambar sesuatu pas ada gap panjang beneran (sebelum baris pertama, sesudah baris terakhir kalau durasinya diketahui, atau antar-baris yang jauh), diem buat lirik yang nggak sinkron atau kosong, dan nggak crash walau nggak ada cover art sama sekali
 - **Config** — BOM dari Notepad ditoleransi, UTF-16 ditolak dengan pesan yang jelas, key yang absen tetep pakai default
 - **Riwayat lagu** — mundur berkali-kali jalan beneran, cabang baru ngebuang riwayat di depannya, dan ada batas maksimal
 - **Warna aksen** — nolak background gelap, jatuh ke hijau Spotify kalau cover-nya monokrom

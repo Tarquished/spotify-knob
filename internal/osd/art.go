@@ -22,6 +22,12 @@ type artwork struct {
 	img    *image.RGBA // cover at card size
 	thumb  *image.RGBA // cover at queue-row size
 	accent color.RGBA
+
+	// accents is a handful of accent colours swept left to right across the
+	// cover, for the lyrics panel's slow colour journey (see liveAccent in
+	// ambient.go). accent above is the single, unchanging colour every other
+	// surface still uses; this is additional, not a replacement for it.
+	accents []color.RGBA
 }
 
 // artCache fetches covers once and keeps a small number around. Album art
@@ -126,7 +132,51 @@ func (c *artCache) load(ctx context.Context, url string) *artwork {
 	th := image.NewRGBA(image.Rect(0, 0, c.thumb, c.thumb))
 	xdraw.CatmullRom.Scale(th, th.Bounds(), src, src.Bounds(), xdraw.Src, nil)
 
-	return &artwork{img: dst, thumb: th, accent: accentFrom(src)}
+	return &artwork{img: dst, thumb: th, accent: accentFrom(src), accents: accentJourney(src)}
+}
+
+// accentJourney runs accentFrom separately over a handful of vertical
+// strips swept left to right across src, instead of over the whole image at
+// once. A single accent already summarises a cover; this keeps the pieces
+// that summary was built from, so a colour can drift across them instead of
+// sitting on one average forever - see liveAccent in ambient.go.
+//
+// Built from the same decoded image the single accent already reads, and
+// only once per cover load, not per frame.
+func accentJourney(src image.Image) []color.RGBA {
+	const stops = 6
+	b := src.Bounds()
+	w := b.Dx()
+	if w <= 0 {
+		return nil
+	}
+	sub, ok := src.(interface {
+		SubImage(image.Rectangle) image.Image
+	})
+	if !ok {
+		// Every decoder in this binary's image registry (jpeg, png) returns
+		// a type that implements this; if some future one somehow does not,
+		// falling back to one repeated colour is a plain accent, not a
+		// crash.
+		one := accentFrom(src)
+		out := make([]color.RGBA, stops)
+		for i := range out {
+			out[i] = one
+		}
+		return out
+	}
+
+	out := make([]color.RGBA, stops)
+	for i := 0; i < stops; i++ {
+		x0 := b.Min.X + i*w/stops
+		x1 := b.Min.X + (i+1)*w/stops
+		if x1 <= x0 {
+			x1 = x0 + 1
+		}
+		strip := image.Rect(x0, b.Min.Y, x1, b.Max.Y)
+		out[i] = accentFrom(sub.SubImage(strip))
+	}
+	return out
 }
 
 // accentFrom picks a colour that represents the cover without being muddy.

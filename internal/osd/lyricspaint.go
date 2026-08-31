@@ -33,10 +33,7 @@ func (w *LyricsWindow) render() {
 	cx, cy, cw, ch := m, m, W-2*m, H-2*m
 	rad := w.px(lyrRadius)
 
-	accent := w.accent
-	if accent.A == 0 {
-		accent = colAccentFallback
-	}
+	accent := w.liveAccent(time.Now())
 
 	// A soft ring instead of a blurred shadow. The panel is resizable, and a
 	// real drop shadow would mean re-blurring a 900x1100 mask on every frame
@@ -56,6 +53,8 @@ func (w *LyricsWindow) render() {
 	} else {
 		p.linear(cx, cy, cx, cy+ch, colCardTop, colCardBottom)
 	}
+
+	w.drawInstrumentalWash(cx, cy, cw, ch, rad, accent)
 
 	// Accent bloom behind the header, anchored on the cover. It breathes
 	// gently with the song's own pace when there is a pace worth echoing
@@ -359,6 +358,42 @@ func (w *LyricsWindow) drawClose(cx, cy, r float64) {
 	}
 }
 
+// drawInstrumentalWash is a slow, low-key colour wash that shows through the
+// card fill while the playhead sits in a long instrumental stretch (see
+// inLongGap) - two soft blobs in the accent's own colour, drifting in a
+// wide, gentle orbit rather than sitting still. It never appears on its own:
+// restLevel eases it in and out, so there is nothing to notice snapping on
+// or off, just the background growing a little more alive while there are
+// no words to show and settling back once there are.
+//
+// Position is driven by the playhead rather than the wall clock - the same
+// choice pulseBreath makes - so a paused track holds the wash still instead
+// of drifting on regardless, and it is drawn through the card's own rounded
+// path (the same fix bloomMask needed - see clipToRoundRect) so it never
+// bleeds past the corners the way the header glow once did.
+func (w *LyricsWindow) drawInstrumentalWash(cx, cy, cw, ch, rad float64, accent color.RGBA) {
+	if w.restLevel <= 0.004 {
+		return
+	}
+	p := w.paint
+	t := float64(w.position(time.Now())) / float64(time.Second)
+	base := 0.16 * w.restLevel
+
+	a1 := t * 0.05
+	x1 := cx + cw*0.55 + math.Cos(a1)*cw*0.22
+	y1 := cy + ch*0.40 + math.Sin(a1*0.83)*ch*0.20
+	p.begin(cx, cy, cw, ch)
+	p.roundRect(cx, cy, cw, ch, rad)
+	p.radial(x1, y1, math.Min(cw, ch)*0.55, scaleAlpha(premul(accent), base))
+
+	a2 := t*-0.037 + 2.1
+	x2 := cx + cw*0.42 + math.Cos(a2)*cw*0.26
+	y2 := cy + ch*0.62 + math.Sin(a2*1.1)*ch*0.22
+	p.begin(cx, cy, cw, ch)
+	p.roundRect(cx, cy, cw, ch, rad)
+	p.radial(x2, y2, math.Min(cw, ch)*0.45, scaleAlpha(premul(lighten(accent, 0.22)), base*0.8))
+}
+
 func (w *LyricsWindow) drawBody(accent color.RGBA) {
 	bx, by, bw, bh := w.bodyRect()
 	if bw <= 0 || bh <= 0 {
@@ -380,6 +415,18 @@ func (w *LyricsWindow) drawBody(accent color.RGBA) {
 	face := w.fonts.face(semibold, w.px(lyrLineSize))
 	fade := w.lineH * lyrFadeLines
 	synced := w.doc.Synced
+	now := time.Now()
+
+	// Freshly opened, the whole body fades in from nothing over lyrOpenFade
+	// rather than the usual per-line edge fade doing that work - it has
+	// already snapped straight to the right scroll position (see open()),
+	// so there is no motion to hide, just an appearance to soften.
+	openFade := 1.0
+	if !w.openedAt.IsZero() {
+		if t := now.Sub(w.openedAt); t < lyrOpenFade {
+			openFade = clamp01(float64(t) / float64(lyrOpenFade))
+		}
+	}
 
 	for i := range w.para {
 		para := &w.para[i]
@@ -388,8 +435,9 @@ func (w *LyricsWindow) drawBody(accent color.RGBA) {
 			continue // off the visible strip
 		}
 
-		alpha := 1.0
+		alpha := openFade
 		base := colLyrPlain
+		pushT := 0.0
 		if synced {
 			switch {
 			case i == w.active:
@@ -398,6 +446,17 @@ func (w *LyricsWindow) drawBody(accent color.RGBA) {
 				base = colLyrPast
 			default:
 				base = colLyrNext
+			}
+			// The line that was active a moment ago settles into its new
+			// look rather than being recoloured on the spot - see
+			// lyrPushDur. base already holds where it is settling to; only
+			// its short trip getting there needs anything extra.
+			if i == w.prevActive {
+				if d := now.Sub(w.prevActiveAt); d < lyrPushDur {
+					raw := clamp01(float64(d) / float64(lyrPushDur))
+					pushT = 1 - (1-raw)*(1-raw)*(1-raw) // ease-out cubic
+					base = lerpColor(colLyrActive, base, pushT)
+				}
 			}
 		}
 		// Fade toward both edges so lines dissolve instead of being cut.
@@ -430,6 +489,15 @@ func (w *LyricsWindow) drawBody(accent color.RGBA) {
 			p.flat(scaleAlpha(premul(accent), alpha*0.95))
 		}
 
+		// A brief upward nudge for the line just settling out of its active
+		// look - "pushed away" by the one that replaced it - rather than a
+		// standing offset: it rises and returns to its ordinary position
+		// within the same lyrPushDur its colour takes to settle.
+		lift := 0.0
+		if pushT > 0 && pushT < 1 {
+			lift = -w.px(6) * math.Sin(math.Pi*pushT)
+		}
+
 		// The active line is one flat bright tone, same as every other line
 		// just a different one - not a per-word wipe. LRCLIB only times whole
 		// lines; a word's own moment is an estimate (see timeWords), good
@@ -437,7 +505,7 @@ func (w *LyricsWindow) drawBody(accent color.RGBA) {
 		// against, so nothing here claims otherwise.
 		col := scaleAlpha(base, alpha)
 		for r, row := range para.rows {
-			baseline := top + w.lineH*0.74 + float64(r)*w.lineH
+			baseline := top + lift + w.lineH*0.74 + float64(r)*w.lineH
 			for _, wd := range row.words {
 				drawText(clip, face, col, bx+wd.x, baseline, wd.text)
 			}

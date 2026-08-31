@@ -2,6 +2,7 @@ package osd
 
 import (
 	"image"
+	"image/color"
 	"math"
 	"sort"
 	"time"
@@ -9,12 +10,15 @@ import (
 	xdraw "golang.org/x/image/draw"
 )
 
-// Ambient mode and the header's beat-echo glow.
+// Ambient mode, the header's beat-echo glow, and the accent's slow journey
+// across the cover.
 //
-// Both are deliberately small: a background treatment and a brightness
-// wobble on something that was already there, not new UI chrome. Nothing
-// here changes what is drawn where - drawHeader, drawBody and drawFooter are
-// untouched - only what sits behind them and how one existing glow breathes.
+// All three are deliberately small: a background treatment, a brightness
+// wobble and a colour drift on things that were already there, not new UI
+// chrome. Nothing here changes what is drawn where - drawHeader, drawBody
+// and drawFooter are untouched - only what sits behind them, how one
+// existing glow breathes, and what colour it and everything else that reads
+// "accent" happen to be this frame.
 
 // buildAmbientBackground turns a small, already-decoded cover into a soft
 // backdrop sized to fill w by h.
@@ -86,4 +90,49 @@ func pulseBreath(pos time.Duration, period time.Duration) float64 {
 	}
 	t := float64(pos%period) / float64(period)
 	return 0.5 + 0.5*math.Cos(2*math.Pi*t)
+}
+
+// liveAccent is the accent colour for this frame: everywhere render() reads
+// "accent" - the header bloom, the active line's bar, the footer rail, the
+// cover's own placeholder gradient - reads the same one, so the whole panel
+// moves together rather than one piece drifting independently of the rest.
+//
+// Normally that is just w.accent, same as always. Once the track's length is
+// known and the cover yielded more than one accent stop, it instead reads a
+// position along accentJourney's sweep of the cover: driven by the playhead,
+// not the wall clock, so scrubbing to a spot or replaying a section always
+// gives back the exact same colour rather than wherever a timer happened to
+// be. A song with an unknown duration - or a cover that came back only one
+// usable colour - keeps the single static accent it always had.
+func (w *LyricsWindow) liveAccent(now time.Time) color.RGBA {
+	base := w.accent
+	if base.A == 0 {
+		base = colAccentFallback
+	}
+	if w.lastArt == nil || len(w.lastArt.accents) < 2 || w.track.Duration <= 0 {
+		return base
+	}
+	f := clamp01(float64(w.position(now)) / float64(w.track.Duration))
+	return accentAlong(w.lastArt.accents, f)
+}
+
+// accentAlong maps f in 0..1 onto a position along stops, interpolating
+// between whichever two neighbouring stops f falls between so the journey
+// reads as continuous drift rather than a handful of visible jump cuts.
+func accentAlong(stops []color.RGBA, f float64) color.RGBA {
+	n := len(stops)
+	switch {
+	case n == 0:
+		return colAccentFallback
+	case n == 1 || f <= 0:
+		return stops[0]
+	case f >= 1:
+		return stops[n-1]
+	}
+	seg := f * float64(n-1)
+	i := int(seg)
+	if i >= n-1 {
+		i = n - 2
+	}
+	return lerpColor(stops[i], stops[i+1], seg-float64(i))
 }

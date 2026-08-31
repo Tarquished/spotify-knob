@@ -16,6 +16,7 @@ func newTestPanel() *LyricsWindow {
 		fonts:        newFontSet(),
 		scale:        1,
 		active:       -1,
+		prevActive:   -1,
 		lastClickIdx: -1,
 	}
 }

@@ -134,6 +134,21 @@ const (
 	lyrWheelStep   = 54
 	lyrIdleGap     = 60 * time.Millisecond
 	lyrTopmostFreq = 2 * time.Second
+
+	// lyrOpenFade is how long the body takes to fade in when the panel opens,
+	// once it has already snapped straight to the right scroll position - see
+	// open(). Short enough to read as an appearance, not an animation.
+	lyrOpenFade = 200 * time.Millisecond
+
+	// lyrPushDur is how long the line that just stopped being active takes to
+	// settle from its active look into its ordinary past-line one - a brief
+	// nudge, not a standing offset. See drawBody.
+	lyrPushDur = 320 * time.Millisecond
+
+	// lyrLongGap is how far apart two lines (or the start/end of the track
+	// and the nearest line) have to be before the gap counts as instrumental
+	// rather than an ordinary breath between lines. See inLongGap.
+	lyrLongGap = 8 * time.Second
 )
 
 // zone is what the pointer is over.
@@ -247,6 +262,22 @@ type LyricsWindow struct {
 	pulsePeriod   time.Duration
 	lastPulseTick time.Time
 
+	// openedAt marks the moment the panel was last shown, so the body can
+	// fade in over lyrOpenFade instead of appearing mid-scroll-animation.
+	// See open().
+	openedAt time.Time
+
+	// The previous active line, and when it stopped being active. Kept
+	// briefly so drawBody can animate it settling into place instead of
+	// recolouring it instantly - see lyrPushDur.
+	prevActive   int
+	prevActiveAt time.Time
+
+	// restLevel eases toward 1 while the playhead sits in a long
+	// instrumental gap and back to 0 once lyrics resume, so the background
+	// wash in render() fades rather than snapping. See inLongGap.
+	restLevel float64
+
 	// Cached rasterisation of the panel's mostly-static chrome. See
 	// lyricscache.go.
 	lc lyricsCache
@@ -310,6 +341,7 @@ func NewLyrics(opts LyricsOptions, log *slog.Logger) *LyricsWindow {
 		events:       make(chan lyricsCmd, 32),
 		state:        docIdle,
 		active:       -1,
+		prevActive:   -1,
 		lastClickIdx: -1,
 	}
 }
@@ -565,8 +597,12 @@ func (w *LyricsWindow) apply(ctx context.Context, c lyricsCmd) {
 		w.scroll, w.scrollTo, w.active = 0, 0, -1
 		w.manualTil = time.Time{}
 		// A stale paragraph index from the previous song must never pair up
-		// with a click on the new one.
+		// with a click on the new one, animate as if it were "pushed" by a
+		// line of a completely different song, or leave a stale instrumental
+		// wash showing over lyrics that just loaded.
 		w.lastClickIdx = -1
+		w.prevActive, w.prevActiveAt = -1, time.Time{}
+		w.restLevel = 0
 		w.pulsePeriod = 0
 		if w.doc != nil && w.doc.Synced {
 			w.pulsePeriod = pulsePeriodFor(w.doc.Lines)
@@ -579,6 +615,8 @@ func (w *LyricsWindow) open() {
 	w.visibl.Store(true)
 	w.dirty = true
 	w.lastTopmost = time.Time{}
+	w.resume(time.Now())
+
 	// A present is what actually shows the window; showing first would put an
 	// uninitialised black rectangle on screen for a frame.
 	w.render()
@@ -586,6 +624,30 @@ func (w *LyricsWindow) open() {
 		w.log.Warn("lyrics panel could not be shown", "err", err)
 	}
 	w.win.reassertTopmost()
+}
+
+// resume catches the panel up to the song at now, as if it had never
+// stopped following along.
+//
+// While the panel is hidden, advance never runs (see Run), so w.active and
+// w.scroll are frozen wherever they were the moment it was last closed -
+// stale the instant the song moves on without it. This snaps both straight
+// to the right spot, rather than through the usual eased scroll, so the
+// panel reads as having been quietly following the whole time instead of
+// visibly scrolling to catch up the instant it reappears. openedAt is set
+// alongside it so the body can still fade in - see lyrOpenFade - and
+// prevActive is cleared: whatever was "active" a moment before the panel
+// closed has no business being pushed away from a position it never
+// actually held on screen.
+func (w *LyricsWindow) resume(now time.Time) {
+	if w.doc != nil && w.doc.Synced {
+		w.active = indexAt(w.doc.Lines, w.position(now))
+	}
+	w.prevActive, w.prevActiveAt = -1, time.Time{}
+	w.layout()
+	w.scrollTo = w.clampScroll(w.anchorFor(w.active))
+	w.scroll = w.scrollTo
+	w.openedAt = now
 }
 
 func (w *LyricsWindow) close() {
@@ -669,6 +731,13 @@ func (w *LyricsWindow) advance(now time.Time) {
 		active = indexAt(w.doc.Lines, pos)
 	}
 	if active != w.active {
+		// Remember what was active so drawBody can animate it settling into
+		// its past-line look instead of recolouring it on the spot. Only
+		// when the old value was a real line - there is nothing to push
+		// away from "nothing was active yet".
+		if w.active >= 0 {
+			w.prevActive, w.prevActiveAt = w.active, now
+		}
 		w.active = active
 		w.dirty = true
 	}
@@ -690,6 +759,31 @@ func (w *LyricsWindow) advance(now time.Time) {
 		w.dirty = true
 	} else if w.scroll != w.scrollTo {
 		w.scroll = w.scrollTo
+		w.dirty = true
+	}
+
+	// The instrumental background wash eases in and out rather than
+	// snapping, using the same exponential approach as the scroll above so
+	// entering and leaving a long gap both read as a fade.
+	restTarget := 0.0
+	if w.inLongGap(pos) {
+		restTarget = 1
+	}
+	if d := restTarget - w.restLevel; math.Abs(d) > 0.004 {
+		w.restLevel += d * (1 - math.Exp(-float64(dt)/float64(lyrScrollTau)))
+		w.dirty = true
+	} else if w.restLevel != restTarget {
+		w.restLevel = restTarget
+		w.dirty = true
+	}
+
+	// Keep repainting for the brief windows where something is animating on
+	// its own rather than in response to the playhead: the just-opened
+	// body's fade-in, and the previous line settling out of its active look.
+	if !w.openedAt.IsZero() && now.Sub(w.openedAt) < lyrOpenFade {
+		w.dirty = true
+	}
+	if w.prevActive >= 0 && now.Sub(w.prevActiveAt) < lyrPushDur {
 		w.dirty = true
 	}
 
@@ -739,6 +833,34 @@ func seekTarget(x, railX, railW float64, dur time.Duration) time.Duration {
 		f = 1
 	}
 	return time.Duration(f * float64(dur))
+}
+
+// inLongGap reports whether pos falls inside a stretch with no lyrics worth
+// showing for at least lyrLongGap: before the first line, after the last one
+// (only once the track's length is known - an unknown duration never ends),
+// or between two lines that are simply timed far apart. It is the trigger
+// for the background wash in render(); see restLevel for how that eases in
+// and out rather than snapping the moment this flips.
+func (w *LyricsWindow) inLongGap(pos time.Duration) bool {
+	if w.doc == nil || !w.doc.Synced || len(w.doc.Lines) == 0 {
+		return false
+	}
+	lines := w.doc.Lines
+	i := indexAt(lines, pos)
+
+	var start, end time.Duration
+	switch {
+	case i < 0:
+		start, end = 0, lines[0].At
+	case i == len(lines)-1:
+		if w.track.Duration <= 0 {
+			return false
+		}
+		start, end = lines[i].At, w.track.Duration
+	default:
+		start, end = lines[i].At, lines[i+1].At
+	}
+	return end-start >= lyrLongGap
 }
 
 func indexAt(lines []LyricLine, pos time.Duration) int {
